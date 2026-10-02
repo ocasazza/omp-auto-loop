@@ -35,6 +35,8 @@ export type SettleReason =
   | "aborted"
   | "verified_complete"
   | "claimed_unverified"
+  | "judged_complete"
+  | "judge_unavailable"
   | "continuation_limit"
   | "cycle_timeout"
   | "gate_retries_exhausted"
@@ -103,6 +105,15 @@ export interface SettleInput {
   readonly gateOutcome?: GateSetOutcome;
   /** Identity fence: a result from a prior run/cycle is ignored. */
   readonly gateResultIsStale: boolean;
+  /**
+   * Corroborating judge outcome for a completion claim on the no-gates path.
+   * JudgeVerdict (ports.ts) also carries `ok`, which the caller has already
+   * consumed to pick this field over judgeUnavailable; the shape is restated
+   * here to keep this module import-free.
+   */
+  readonly judgeVerdict?: { readonly done: boolean; readonly rationale: string };
+  /** True when the judge was enabled but unusable (timeout, non-2xx, unparseable). */
+  readonly judgeUnavailable?: boolean;
   readonly nowMs: number;
 }
 
@@ -135,7 +146,12 @@ function limitReason(
  *  6. gate aggregate passed           -> settle(verified_complete)
  *  7. gate failed, budget remains     -> continue with local failure evidence
  *  8. gate timeout/exhausted/unavailable, or a cap tripped -> settle, never verified
- *  9. claim without gates             -> settle(claimed_unverified)
+ *  9. claim without gates, judge verdict done  -> settle(judged_complete)
+ *     9a. claim without gates, judge verdict !done -> continue (the caller
+ *         puts the rationale in the continuation text); a cap already tripped
+ *         settles with the cap reason instead
+ *     9b. claim without gates, judge ran but unusable -> settle(judge_unavailable)
+ *     9c. claim without gates, judge not configured -> settle(claimed_unverified)
  * 10. no claim and a cap tripped      -> settle(cap reason)
  * 11. otherwise                       -> continue
  */
@@ -187,11 +203,24 @@ export function shouldContinue(args: DecideArgs): Decision {
     }
   }
 
+  // Clause 9: claim without gates. The judge, when enabled, supplies the
+  // corroboration a bare claim lacks; its verdicts, in order:
   if (input.claimsCompletion) {
+    if (input.judgeVerdict) {
+      if (input.judgeVerdict.done) return settle("judged_complete", state.continuations);
+      // Rejected: keep working while budget remains; a cap already tripped
+      // is what actually ends the cycle.
+      const capped = limitReason(state, limits, input.nowMs);
+      if (capped) return settle(capped);
+      return { kind: "continue", continuations: state.continuations + 1 };
+    }
+    if (input.judgeUnavailable) {
+      // Fail closed: a judge that could not produce a verdict is never a pass.
+      return settle("judge_unavailable", state.continuations);
+    }
     // No gates configured: a claim settles the session, but explicitly
-    // unverified. This is the live production path today (ReVeal 2506.11442:
-    // self-verification is not evidence).
-    return settle("claimed_unverified");
+    // unverified (ReVeal 2506.11442: self-verification is not evidence).
+    return settle("claimed_unverified", state.continuations);
   }
 
   const capped = limitReason(state, limits, input.nowMs);

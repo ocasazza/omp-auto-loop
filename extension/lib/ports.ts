@@ -58,3 +58,32 @@ export interface FsPort {
   /** Atomically replace `to` with `from`. */
   rename(from: string, to: string): Promise<void>;
 }
+
+// ---------------------------------------------------------------------------
+// Completion judge — corroborates a completion claim that gates cannot, on the
+// no-gates path. Unusable answers surface as ok:false and are never a pass.
+// ---------------------------------------------------------------------------
+
+/** What the judge is asked to corroborate: goal, self-reported reply, evidence. */
+export interface JudgeRequest {
+  /** The active goal objective; "" when no goal is set. */
+  readonly objective: string;
+  /** Final assistant reply. An untrusted self-report, never evidence. */
+  readonly reply: string;
+  /** Command output / test results backing the claim; "" when none exists. */
+  readonly evidence: string;
+}
+
+export interface JudgeVerdict {
+  /** False when the judge could not run or its answer was unusable. */
+  readonly ok: boolean;
+  /** Meaningful only when `ok`: did the evidence substantiate the claim? */
+  readonly done: boolean;
+  /** Verdict rationale when `ok`; the failure reason otherwise. Never a pass on failure. */
+  readonly rationale: string;
+}
+
+export interface JudgePort {
+  /** Corroborate a completion claim. Unusable judge answers surface as ok:false, never done:true. */
+  judge(request: JudgeRequest): Promise<JudgeVerdict>;
+}
