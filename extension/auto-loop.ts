@@ -59,7 +59,15 @@ import {
   buildGateOutcome,
   goalPrefix as v2GoalPrefix,
   type Decision,
+  type GateSetOutcome,
 } from "./lib/core.ts";
+import {
+  buildJudgePrompt,
+  extractEvidence,
+  judgeFailureContext,
+  parseJudgeVerdict,
+} from "./lib/judge.ts";
+import type { JudgePort, JudgeVerdict } from "./lib/ports.ts";
 import {
   runGateSet,
   gateFailureContext,
@@ -134,6 +142,12 @@ function lastAssistantRecord(messages: unknown): Record<string, unknown> | null 
     if (msg && msg.role === "assistant") return msg;
   }
   return null;
+}
+
+/** The transcript as an array, for evidence extraction. */
+function lastMessages(event: unknown): unknown[] {
+  const messages = record(event)?.messages;
+  return Array.isArray(messages) ? messages : [];
 }
 
 /** Concatenated text parts of the last assistant message, or "". */
@@ -421,6 +435,59 @@ export default function (pi: {
     nowMs: () => Date.now(),
   };
 
+  // The judge is disabled unless OMP_AUTO_LOOP_JUDGE_MODEL is set, so an
+  // unconfigured deployment settles a bare claim exactly as before. The
+  // default endpoint is omp's loopback Envoy AI Gateway proxy, which stays up
+  // when the laptop-cluster forwarder on :8000 does not; loopback-only, so no
+  // credential handling belongs here.
+  const JUDGE_MAX_TOKENS = 96;
+  const JUDGE_EVIDENCE_MAX_CHARS = 4000;
+  const judgePort: JudgePort | undefined = process.env.OMP_AUTO_LOOP_JUDGE_MODEL
+    ? {
+        judge: async (request): Promise<JudgeVerdict> => {
+          const model = process.env.OMP_AUTO_LOOP_JUDGE_MODEL as string;
+          const baseUrl =
+            process.env.OMP_AUTO_LOOP_JUDGE_BASE_URL ?? "http://127.0.0.1:22000/v1";
+          const timeoutMs = Number(process.env.OMP_AUTO_LOOP_JUDGE_TIMEOUT_MS ?? 30000);
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), timeoutMs);
+          try {
+            const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                model,
+                messages: [{ role: "user", content: buildJudgePrompt(request) }],
+                temperature: 0,
+                max_tokens: JUDGE_MAX_TOKENS,
+              }),
+              signal: controller.signal,
+            });
+            if (!response.ok) {
+              return { ok: false, done: false, rationale: `judge HTTP ${response.status}` };
+            }
+            const payload = record(await response.json());
+            const choices = payload && Array.isArray(payload.choices) ? payload.choices : [];
+            const content = record(record(choices[0])?.message)?.content;
+            const verdict = typeof content === "string" ? parseJudgeVerdict(content) : null;
+            if (!verdict) {
+              return {
+                ok: false,
+                done: false,
+                rationale: "unparseable judge reply",
+              };
+            }
+            return verdict;
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            return { ok: false, done: false, rationale: `judge request failed: ${reason}` };
+          } finally {
+            clearTimeout(timer);
+          }
+        },
+      }
+    : undefined;
+
   // Every note() lands in the event log (JSONL, one line per event) that
   // resumeFromLog replays, and in graph.lines, the projection the jump-cannon
   // canvas imports.
@@ -637,31 +704,84 @@ export default function (pi: {
 
     const currentConfig = getEffective();
 
-    if (loopState.goal.status === "active" && !loopState.paused && !loopState.disabled) {
+    // `goal complete` moves the goal to "complete" before the turn ends, so
+    // gating on "active" alone would skip the decision for exactly the state
+    // that needs one.
+    if ((loopState.goal.status === "active" || loopState.completionClaimed) && !loopState.paused && !loopState.disabled) {
       const stopReason = lastAssistantText(event);
-      const decision = await shouldContinue({
-        loopState,
-        stopReason,
-        gateCommands: currentConfig.gateCommands,
-        gateMaxRetries: DEFAULT_GATE_RETRIES, // Use DEFAULT for gate retries
-        gateTimeoutMs: DEFAULT_GATE_TIMEOUT_MS, // Use DEFAULT for gate timeout
-        cwd: ctxCwd(),
-        fs: nodeFs,
-        exec: nodeExec,
-        git: nodeGit,
-        note,
-        gateAttemptLedger,
+      // The decision core is pure: it takes observed facts, not ports. Gates
+      // are evidence, so they run HERE and their aggregate is passed in.
+      const gateCommands = currentConfig.gateCommands ?? [];
+      let gateOutcome: GateSetOutcome | undefined;
+      if (gateCommands.length > 0) {
+        const run = await runGateSet(
+          {
+            commands: gateCommands,
+            maxRetries: DEFAULT_GATE_RETRIES,
+            perCommandTimeoutMs: DEFAULT_GATE_TIMEOUT_MS,
+            totalTimeoutMs: DEFAULT_GATE_TIMEOUT_MS * gateCommands.length,
+            cwd: ctxCwd(),
+            exec: nodeExec,
+            git: nodeGit,
+          },
+          gateAttemptLedger,
+        );
+        gateOutcome = buildGateOutcome(run.local, run.exhausted, run.unavailable);
+      }
+
+      // The judge only speaks when gates cannot: a gate set is the stronger
+      // evidence, so consulting a model alongside it would add latency and
+      // cost for nothing.
+      let judgeVerdict: { done: boolean; rationale: string } | undefined;
+      let judgeUnavailable = false;
+      if (loopState.completionClaimed && gateCommands.length === 0 && judgePort) {
+        const verdict = await judgePort.judge({
+          objective: loopState.goal.objective,
+          reply: lastAssistantText(event),
+          evidence: extractEvidence(lastMessages(event), JUDGE_EVIDENCE_MAX_CHARS),
+        });
+        if (verdict.ok) {
+          judgeVerdict = { done: verdict.done, rationale: verdict.rationale };
+          note(`judge verdict: ${verdict.done ? "VERIFIED" : "UNVERIFIED"}`);
+        } else {
+          judgeUnavailable = true;
+          note(`judge unavailable: ${verdict.rationale}`);
+        }
+      }
+      const decision = shouldContinue({
+        state: loopState,
+        limits: {
+          maxContinuations: currentConfig.maxContinuations,
+          timeoutMs: currentConfig.timeoutMs,
+        },
+        goal: loopState.goal,
+        input: {
+          // A session with no UI is headless unless the config opts in.
+          headless: !ctx.hasUI,
+          headlessOptIn: currentConfig.headless,
+          // Structural: the goal tool raised the claim. A text marker would be
+          // forgeable by the reply under judgment.
+          claimsCompletion: loopState.completionClaimed,
+          scheduledContinuation: loopState.scheduledContinuation,
+          stopReason,
+          configuredGates: gateCommands,
+          gateOutcome,
+          gateResultIsStale: false,
+          judgeVerdict,
+          judgeUnavailable,
+          nowMs: Date.now(),
+        },
       });
 
-      if (decision.continue) {
-        loopState.continuations++;
+      if (decision.kind === "continue") {
+        loopState.continuations = decision.continuations;
         loopState.goal.continuationsUsed++;
         pi.sendMessage(CONTINUATION_DIRECTIVE);
         loopState.scheduledContinuation = true;
         note(
-          `autonomous continuation: ${loopState.continuations}/${currentConfig.maxContinuations}. ${decision.reason}`,
+          `autonomous continuation: ${loopState.continuations}/${currentConfig.maxContinuations}. ${decision.reason ?? "no claim"}`,
         );
-      } else {
+      } else if (decision.kind === "settle") {
         note(`settled: ${decision.reason}`);
       }
     }
