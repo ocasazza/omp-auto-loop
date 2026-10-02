@@ -192,3 +192,42 @@ test("untyped lines from an older extension are typed on the next write", () => 
   assert.ok(edges(text).includes("E|sk7|ek7_1|emitted"));
   assert.ok(edges(text).includes("E|ek7_1|ek7_2|next"));
 });
+
+// Regression: a node with an empty title rejects the whole document under the
+// importer's `field` rule (one or more characters), which is how the canvas
+// stayed down until the record was removed by hand.
+function grammarClean(text: string): string[] {
+  const bad: string[] = [];
+  for (const line of text.split("\n").filter(Boolean)) {
+    if (!line.startsWith("N|")) continue;
+    const [, id, title, kind] = line.split("|");
+    if (!id || !title || !kind) bad.push(line);
+  }
+  return bad;
+}
+
+test("a goal with no objective produces no node and no edge", () => {
+  const text = p.apply("", { ...base, goal: { objective: "", status: "paused" } }, "goal set: x", "t");
+  expect(grammarClean(text)).toEqual([]);
+  expect(!edges(text).some((e) => e.includes("|pursues"))).toBe(true);
+  expect(nodes(text).some((l) => l.startsWith("N|sk1|"))).toBe(true);
+});
+
+test("a blank gate command is dropped, not emitted empty", () => {
+  const text = p.apply("", { ...base, gates: ["  "] }, "gate failed", "t");
+  expect(grammarClean(text)).toEqual([]);
+  expect(!edges(text).some((e) => e.endsWith("|runs_gate"))).toBe(true);
+});
+
+test("a document already poisoned on disk heals on the next write", () => {
+  const poisoned = [
+    "N|sk1|jaeger#k1|session|no-goal|cwd=/ws/jaeger",
+    "N|g811c9dc5||goal|paused|",
+    "E|sk1|g811c9dc5|pursues",
+    "",
+  ].join("\n");
+  const text = p.apply(poisoned, base, "goal set: ship the cleanup", "t");
+  expect(grammarClean(text)).toEqual([]);
+  expect(!nodes(text).some((l) => l.startsWith("N|g811c9dc5|"))).toBe(true);
+  expect(!edges(text).some((e) => e.includes("g811c9dc5"))).toBe(true);
+});
