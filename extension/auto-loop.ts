@@ -236,10 +236,11 @@ export const GoalParams = type({
 export {
   type SessionConfig,
   DEFAULT_SESSION_CONFIG,
-  SESSION_OVERRIDES_KEY,
   type LoopActions,
   getEffectiveConfig,
 } from "./lib/config.ts";
+
+import { SESSION_OVERRIDES_KEY } from "./lib/config.ts";
 
 type GoalAction = "set" | "pause" | "resume" | "complete" | "status";
 
