@@ -1,0 +1,8 @@
+{
+  "name": "omp-auto-loop",
+  "private": true,
+  "devDependencies": {
+    "@oh-my-pi/omptype": "^18.4.10",
+    "@types/bun": "latest"
+  }
+}
