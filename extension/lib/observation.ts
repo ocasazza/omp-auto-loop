@@ -126,6 +126,16 @@ export interface GraphProjection {
 
 const nodeId = (line: string) => line.split("|")[1]!;
 const nodeKind = (line: string) => line.split("|")[3]!;
+
+/**
+ * The importer's `field` rule matches one or more characters, so a node with
+ * an empty id, title, or kind rejects the entire document and the canvas
+ * refuses to start. Producers must not write one.
+ */
+function representable(line: string): boolean {
+  const [, id, title, kind] = line.split("|");
+  return Boolean(id && title && kind);
+}
 /** Edge kinds, declared as `[[schema.edge_types]]` in the omp-auto-loop package. */
 export type EdgeKind = "in_repo" | "pursues" | "runs_gate" | "spawned" | "emitted" | "next";
 
@@ -165,6 +175,10 @@ class Doc {
     for (const line of lines) {
       if (!line.startsWith("E|")) continue;
       const [source, target] = endpoints(line);
+      // A record the importer would reject is dropped on read, so a document
+      // already poisoned on disk heals on the next write instead of keeping
+      // the canvas down forever.
+      if (!kindOf.has(source) || !kindOf.has(target)) continue;
       // An untyped line (written by an older extension) gets the kind its
       // endpoint kinds imply, so the document heals on the next write.
       const kind =
@@ -178,7 +192,13 @@ class Doc {
     return this.nodeIndex.has(id);
   }
 
-  upsert(line: string): void {
+  /**
+   * Upsert a node, or drop it when a required field is empty. Returns whether
+   * the node is in the document, so a caller never links an edge to a node the
+   * importer will reject.
+   */
+  upsert(line: string): boolean {
+    if (!representable(line)) return false;
     const id = nodeId(line);
     const at = this.nodeIndex.get(id);
     if (at === undefined) {
@@ -187,7 +207,9 @@ class Doc {
     } else {
       this.nodes[at] = line;
     }
+    return true;
   }
+
 
   /** One edge per (source, target); the kind is an attribute, not identity. */
   link(source: string, target: string, kind: EdgeKind | null): void {
@@ -252,15 +274,22 @@ export function createGraphProjection(): GraphProjection {
         doc.upsert(`N|${repo}|${atom(s.repo.name)}|repo|${atom(s.repo.name)}|root=${atom(s.repo.root, 200)}`);
         doc.link(hub, repo, "in_repo");
       }
-      if (s.goal) {
+      // An edge to a node the importer would reject is itself rejected, so
+      // every link below is conditional on the node having been stored. Blank
+      // text is not a record: `atom` keeps spaces, which the grammar admits
+      // but which names nothing.
+      if (s.goal && s.goal.objective.trim()) {
         const goal = ids.goal(s.goal.objective);
-        doc.upsert(withBody(`N|${goal}|${atom(s.goal.objective)}|goal|${s.goal.status}|`, s.goal.objective));
-        doc.link(hub, goal, "pursues");
+        if (doc.upsert(withBody(`N|${goal}|${atom(s.goal.objective)}|goal|${s.goal.status}|`, s.goal.objective))) {
+          doc.link(hub, goal, "pursues");
+        }
       }
       for (const command of s.gates) {
+        if (!command.trim()) continue;
         const gate = ids.gate(command);
-        doc.upsert(withBody(`N|${gate}|${atom(command)}|gate||`, command));
-        doc.link(hub, gate, "runs_gate");
+        if (doc.upsert(withBody(`N|${gate}|${atom(command)}|gate||`, command))) {
+          doc.link(hub, gate, "runs_gate");
+        }
       }
       // Only link a parent the document already has: no dangling edges.
       if (s.parentKey && doc.has(ids.session(s.parentKey))) {
@@ -270,12 +299,15 @@ export function createGraphProjection(): GraphProjection {
       if (cls !== "heartbeat") {
         const last = doc.lastSeq(s.key);
         const event = ids.event(s.key, last + 1);
-        doc.upsert(
-          withBody(`N|${event}|${atom(msg)}|event|${cls}|ts=${atom(ts)};sess=${atom(s.label)}`, msg),
-        );
-        doc.link(hub, event, "emitted");
-        const previous = ids.event(s.key, last);
-        if (last > 0 && doc.has(previous)) doc.link(previous, event, "next");
+        if (
+          doc.upsert(
+            withBody(`N|${event}|${atom(msg)}|event|${cls}|ts=${atom(ts)};sess=${atom(s.label)}`, msg),
+          )
+        ) {
+          doc.link(hub, event, "emitted");
+          const previous = ids.event(s.key, last);
+          if (last > 0 && doc.has(previous)) doc.link(previous, event, "next");
+        }
       }
       return doc.toString();
     },
