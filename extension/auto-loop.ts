@@ -564,23 +564,45 @@ export default function (pi: {
     return typeof isIdle === "function" && isIdle.call(loopState.lastCtx) === true;
   }
 
+  // The pi extension API has no readEntries; custom entries are replayed from
+  // the session log via the handler ctx's sessionManager.
+  function readCustomEntries(ctx: unknown, customType: string): { data: unknown }[] {
+    if (ctx === null || typeof ctx !== "object" || !("sessionManager" in ctx)) return [];
+    const sm = (ctx as { sessionManager: unknown }).sessionManager;
+    if (sm === null || typeof sm !== "object" || !("getBranch" in sm) || typeof sm.getBranch !== "function") return [];
+    const entries: unknown[] = sm.getBranch();
+    return entries.filter((e): e is { data: unknown } =>
+      e !== null && typeof e === "object" && "type" in e && e.type === "custom"
+      && "customType" in e && e.customType === customType && "data" in e);
+  }
+
+  function sessionStartConfig(data: unknown): { overrides?: Partial<SessionConfig>; disabled?: boolean; paused?: boolean } | null {
+    if (data === null || typeof data !== "object") return null;
+    const cfg: { overrides?: Partial<SessionConfig>; disabled?: boolean; paused?: boolean } = {};
+    if ("overrides" in data) cfg.overrides = data.overrides as Partial<SessionConfig>;
+    if ("disabled" in data && typeof data.disabled === "boolean") cfg.disabled = data.disabled;
+    if ("paused" in data && typeof data.paused === "boolean") cfg.paused = data.paused;
+    return cfg;
+  }
+
   pi.on("session_start", async (event, ctx) => {
     loopState.lastCtx = ctx; // Set lastCtx in loopState
     // Replay overrides
-    const configEntries = await pi.readEntries("auto_loop_config");
-    if (configEntries && configEntries.length > 0) {
-        const latestConfig = configEntries[configEntries.length - 1].data as { overrides: Partial<SessionConfig>; disabled: boolean; paused: boolean; };
-        if (latestConfig.overrides) {
+    const configEntries = readCustomEntries(ctx, "auto_loop_config");
+    if (configEntries.length > 0) {
+        const latestConfig = sessionStartConfig(configEntries[configEntries.length - 1].data);
+        if (latestConfig?.overrides) {
             sessionOverrides.set(sessionKey(loopState.lastCtx, record, idPart), latestConfig.overrides);
         }
-        loopState.disabled = latestConfig.disabled;
-        loopState.paused = latestConfig.paused;
+        loopState.disabled = latestConfig?.disabled ?? loopState.disabled;
+        loopState.paused = latestConfig?.paused ?? loopState.paused;
     }
 
     // Replay goal if exists
-    const goalEntries = await pi.readEntries("auto_loop_goal");
-    if (goalEntries && goalEntries.length > 0) {
-        loopState.goal = goalEntries[goalEntries.length - 1].data as GoalState;
+    const goalEntries = readCustomEntries(ctx, "auto_loop_goal");
+    const goalData = goalEntries.length > 0 ? goalEntries[goalEntries.length - 1].data : null;
+    if (goalData !== null && typeof goalData === "object" && "status" in goalData && "objective" in goalData) {
+      loopState.goal = goalData as GoalState;
     }
 
     if (loopState.disabled) {
