@@ -240,7 +240,7 @@ export {
   getEffectiveConfig,
 } from "./lib/config.ts";
 
-import { SESSION_OVERRIDES_KEY, DEFAULT_SESSION_CONFIG } from "./lib/config.ts";
+import { SESSION_OVERRIDES_KEY, DEFAULT_SESSION_CONFIG, getEffectiveConfig } from "./lib/config.ts";
 
 type GoalAction = "set" | "pause" | "resume" | "complete" | "status";
 
