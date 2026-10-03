@@ -20,7 +20,9 @@ const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_HEARTBEAT_MS = 10 * 60 * 1000; // 10 minutes
 
 export const DEFAULT_SESSION_CONFIG: SessionConfig = {
-  dashboardPort: 8799, // Default if not in config.json or env
+  // 8799 is the jump-cannon graph-api's port, so the loop dashboard cannot
+  // claim it: both would be the default and the second to start would lose.
+  dashboardPort: 8798, // Default if not in config.json or env
   maxContinuations: DEFAULT_MAX_CONTINUATIONS,
   timeoutMs: DEFAULT_TIMEOUT_MS,
   heartbeatMs: DEFAULT_HEARTBEAT_MS,
