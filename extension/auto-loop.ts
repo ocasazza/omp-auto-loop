@@ -39,6 +39,7 @@ import * as os from 'os';
 import { readFileSync } from 'fs';
 import { registerCommands } from './lib/commands'; // NEW import for commands
 import { createDashboard } from './lib/dashboard.ts';
+import { encodeCommand, selectCommands, type ControlCommand, type ControlAction } from './lib/control.ts';
 import type { ExtensionCommandContext, AutocompleteItem } from '@oh-my-pi/pi-coding-agent';
 
 import { type } from "@oh-my-pi/omptype";
@@ -508,6 +509,56 @@ export default function (pi: {
     Date.now(),
   );
 
+  // Steering from outside the terminal. One file, read by every session on
+  // this host, because only one of them can hold the dashboard port and an
+  // action must not depend on which. Commands are consumed by timestamp, so a
+  // session that starts later does not replay a day of old steering onto a
+  // fresh run.
+  const controlFile = `${stateDir}/control.jsonl`;
+  let controlCursor = 0;
+  try {
+    const existing = readFileSync(controlFile, "utf8");
+    controlCursor = selectCommands(existing, sessionLabel, 0).cursor;
+  } catch {
+    // No channel yet: the first command creates it.
+  }
+
+  const applyCommand = (command: ControlCommand): void => {
+    switch (command.action) {
+      case "pause":
+        actions.setPaused(true);
+        break;
+      case "resume":
+        actions.setPaused(false);
+        break;
+      case "disable":
+        actions.disable();
+        break;
+      case "enable":
+        actions.enable();
+        break;
+      case "goal":
+        if (command.value) actions.setGoal(command.value);
+        break;
+    }
+    note(`steered: ${command.action}${command.value ? ` — ${command.value.slice(0, 80)}` : ""}`);
+  };
+
+  const drainControl = (): void => {
+    let text = "";
+    try {
+      text = readFileSync(controlFile, "utf8");
+    } catch {
+      return;
+    }
+    const selected = selectCommands(text, sessionLabel, controlCursor);
+    controlCursor = selected.cursor;
+    for (const command of selected.commands) applyCommand(command);
+  };
+
+  const controlTimer = setInterval(drainControl, 2_000);
+  if (typeof controlTimer.unref === "function") controlTimer.unref();
+
   // The loop's own human surface. `dashboardPort` was reserved in config from
   // the start and nothing served it, so `/autoloop open-dashboard` opened the
   // jump-cannon canvas instead -- five thousand nodes answering a different
@@ -645,8 +696,25 @@ export default function (pi: {
           }
         },
         onError: (message) => note(`dashboard unavailable: ${message}`),
+        onListening: (url) => note(`dashboard: ${url}`),
+        steer: (command) => {
+          // Append, never rewrite: every session reads this file and appends
+          // to it, so a read-modify-write would drop whichever steering landed
+          // in the window. O_APPEND makes one line one write.
+          appendFileSync(
+            controlFile,
+            encodeCommand({
+              at: Date.now(),
+              target: command.target,
+              action: command.action as ControlAction,
+              value: command.value,
+              by: "dashboard",
+            }),
+          );
+        },
       });
-      note(`dashboard: ${dashboard.url}`);
+      // Only on a real bind: announcing a URL that never came up sends
+      // whoever reads the log looking for a page that is not there.
     } catch (error) {
       note(`dashboard unavailable: ${error instanceof Error ? error.message : String(error)}`);
     }

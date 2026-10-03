@@ -109,8 +109,11 @@ test("an event message cannot inject markup", () => {
   const state = parseProjection(event("2026-01-01T00:00:10Z", "goal", "<script>alert(1)</script>"));
   const html = renderDashboard(state);
 
-  assert.doesNotMatch(html, /<script>/);
-  assert.match(html, /&lt;script&gt;/);
+  // The page has a script of its own, and the escaped text necessarily still
+  // contains the word "alert(1)". What must not survive is the executable
+  // form: a literal opening tag followed by the payload.
+  assert.doesNotMatch(html, /<script>alert/);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
 });
 
 test("a quote in a label cannot break out of an attribute", () => {
@@ -159,4 +162,137 @@ test("a taken port reports and does not throw", async () => {
   assert.match(reported, /in use|EADDRINUSE/i);
   dashboard.close();
   await new Promise<void>((resolve) => blocker.close(() => resolve()));
+});
+
+// --- the self-improvement signal -----------------------------------------
+
+test("the verdict mix separates claims from evidence", () => {
+  const state = parseProjection(
+    [
+      event("2026-01-01T00:00:01Z", "settled", "settled: claimed_unverified"),
+      event("2026-01-01T00:00:02Z", "settled", "settled: claimed_unverified"),
+      event("2026-01-01T00:00:03Z", "settled", "settled: judged_complete"),
+      event("2026-01-01T00:00:04Z", "settled", "settled: judge_unavailable"),
+    ].join("\n"),
+  );
+
+  // Ties are broken by name, so the strip does not reorder between refreshes.
+  assert.deepEqual(state.verdicts, [
+    { reason: "claimed_unverified", count: 2 },
+    { reason: "judge_unavailable", count: 1 },
+    { reason: "judged_complete", count: 1 },
+  ]);
+});
+
+test("a non-settle event is not a verdict", () => {
+  const state = parseProjection(event("2026-01-01T00:00:01Z", "continue", "autonomous continuation 1/3"));
+  assert.deepEqual(state.verdicts, []);
+});
+
+test("the page states the corroboration rate", () => {
+  const state = parseProjection(
+    [
+      event("2026-01-01T00:00:01Z", "settled", "settled: judged_complete"),
+      event("2026-01-01T00:00:02Z", "settled", "settled: claimed_unverified"),
+    ].join("\n"),
+  );
+  const html = renderDashboard(state);
+
+  assert.match(html, /claims corroborated <b>50%<\/b> of 2/);
+  assert.match(html, /how claims settled/);
+});
+
+test("no settles means no rate rather than a zero", () => {
+  const html = renderDashboard(parseProjection(session()));
+  assert.doesNotMatch(html, /claims corroborated/);
+});
+
+// --- steering ------------------------------------------------------------
+
+const withDashboard = async (
+  options: { steer?: (c: { target: string; action: string; value?: string }) => void },
+  run: (base: string) => Promise<void>,
+) => {
+  const http = await import("node:http");
+  const probe = http.createServer(() => {});
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", () => resolve()));
+  const port = (probe.address() as { port: number }).port;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+
+  const { createDashboard } = await import("../extension/lib/dashboard.ts");
+  const dashboard = createDashboard({ port, readProjection: () => "", ...options });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  try {
+    await run(`http://127.0.0.1:${port}`);
+  } finally {
+    dashboard.close();
+  }
+};
+
+const post = (base: string, body: unknown, headers: Record<string, string> = { "content-type": "application/json" }) =>
+  fetch(`${base}/api/action`, { method: "POST", headers, body: JSON.stringify(body) });
+
+test("steering applies the action it was given", async () => {
+  const seen: unknown[] = [];
+  await withDashboard({ steer: (c) => seen.push(c) }, async (base) => {
+    const response = await post(base, { target: "s1", action: "pause" });
+
+    assert.equal(response.status, 202);
+    assert.deepEqual(seen, [{ target: "s1", action: "pause", value: undefined }]);
+  });
+});
+
+test("a GET cannot steer: an <img> on any page would otherwise be enough", async () => {
+  const seen: unknown[] = [];
+  await withDashboard({ steer: (c) => seen.push(c) }, async (base) => {
+    const response = await fetch(`${base}/api/action`);
+
+    assert.equal(response.status, 405);
+    assert.deepEqual(seen, []);
+  });
+});
+
+test("a form-encoded POST cannot steer", async () => {
+  const seen: unknown[] = [];
+  await withDashboard({ steer: (c) => seen.push(c) }, async (base) => {
+    const response = await post(base, { action: "pause" }, { "content-type": "application/x-www-form-urlencoded" });
+
+    assert.equal(response.status, 415);
+    assert.deepEqual(seen, []);
+  });
+});
+
+test("an unknown action is refused, not ignored", async () => {
+  const seen: unknown[] = [];
+  await withDashboard({ steer: (c) => seen.push(c) }, async (base) => {
+    const response = await post(base, { target: "s1", action: "rm -rf /" });
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(seen, []);
+  });
+});
+
+test("a goal with no objective is refused", async () => {
+  const seen: unknown[] = [];
+  await withDashboard({ steer: (c) => seen.push(c) }, async (base) => {
+    assert.equal((await post(base, { target: "s1", action: "goal" })).status, 400);
+    assert.equal((await post(base, { target: "s1", action: "goal", value: "   " })).status, 400);
+
+    assert.deepEqual(seen, []);
+  });
+});
+
+test("an unspecified target steers every session", async () => {
+  const seen: { target: string }[] = [];
+  await withDashboard({ steer: (c) => seen.push(c) }, async (base) => {
+    await post(base, { action: "pause" });
+
+    assert.equal(seen[0].target, "*");
+  });
+});
+
+test("with no steer sink the route refuses rather than pretending", async () => {
+  await withDashboard({}, async (base) => {
+    assert.equal((await post(base, { action: "pause" })).status, 403);
+  });
 });
