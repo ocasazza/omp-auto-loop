@@ -29,6 +29,40 @@ export interface SessionRow {
   readonly lastSeen: string;
 }
 
+/**
+ * The event log is the record; the graph projection is best-effort.
+ *
+ * `graph.lines` is written under a lock that gives up when another session
+ * holds it, so a settle can be in the log and absent from the projection —
+ * measurably so: both `judged_complete` settles on this host are missing from
+ * the graph. Sessions come from the projection, because that is where live
+ * state lives; decisions come from the log, because that is what actually
+ * happened.
+ */
+export function parseEvents(text: string): DecisionRow[] {
+  const rows: DecisionRow[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof raw !== "object" || raw === null) continue;
+    const record = raw as Record<string, unknown>;
+    const { ts, session, kind, msg } = record;
+    if (typeof ts !== "string" || typeof msg !== "string") continue;
+    rows.push({
+      ts,
+      session: typeof session === "string" ? session : "",
+      kind: typeof kind === "string" ? kind : "other",
+      message: msg,
+    });
+  }
+  return rows;
+}
+
 export interface DecisionRow {
   readonly ts: string;
   readonly session: string;
@@ -41,6 +75,16 @@ export interface DashboardState {
   readonly decisions: readonly DecisionRow[];
   /** How completion claims resolve, which is what the loop is here to improve. */
   readonly verdicts: readonly { readonly reason: string; readonly count: number }[];
+  /**
+   * The same mix over the last day. The all-time figure is dominated by settles
+   * from before a judge existed, so a page that shows only that reports a rate
+   * the loop can no longer produce — it reads as "the judge never works" when
+   * the truth is "the judge is new". Both are shown, labelled.
+   */
+  readonly recent: {
+    readonly windowHours: number;
+    readonly verdicts: readonly { readonly reason: string; readonly count: number }[];
+  };
 }
 
 /**
@@ -50,10 +94,19 @@ export interface DashboardState {
  * is the judge failing open, which is a defect in the judge and not in the
  * agent. A rising `claimed_unverified` share means steering is getting weaker.
  */
-export function verdictMix(decisions: readonly DecisionRow[]): { reason: string; count: number }[] {
+export function verdictMix(
+  decisions: readonly DecisionRow[],
+  nowMs?: number,
+  windowHours?: number,
+): { reason: string; count: number }[] {
   const counts = new Map<string, number>();
+  const since = nowMs !== undefined && windowHours !== undefined ? nowMs - windowHours * 3_600_000 : undefined;
   for (const d of decisions) {
     if (!d.message.startsWith("settled: ")) continue;
+    if (since !== undefined) {
+      const at = Date.parse(d.ts);
+      if (!Number.isFinite(at) || at < since) continue;
+    }
     const reason = d.message.slice("settled: ".length).trim() || "unknown";
     counts.set(reason, (counts.get(reason) ?? 0) + 1);
   }
@@ -96,9 +149,9 @@ const num = (props: Map<string, string>, key: string): number => {
  * never thrown on, because the dashboard's job is to show what is there —
  * a writer mid-rename must cost a row, not the page.
  */
-export function parseProjection(text: string): DashboardState {
+export function parseProjection(text: string, eventsText?: string): DashboardState {
   const sessions: SessionRow[] = [];
-  const decisions: DecisionRow[] = [];
+  const decisions: DecisionRow[] = eventsText === undefined ? [] : parseEvents(eventsText);
 
   for (const line of text.split("\n")) {
     if (!line.startsWith("N|")) continue;
@@ -121,15 +174,6 @@ export function parseProjection(text: string): DashboardState {
         cwd: node.props.get("cwd") ?? "",
         lastSeen: "",
       });
-    } else if (node.kind === "event") {
-      const ts = node.props.get("ts") ?? "";
-      if (!ts) continue;
-      decisions.push({
-        ts,
-        session: node.props.get("sess") ?? "",
-        kind: node.tags[0] ?? "other",
-        message: node.title,
-      });
     }
   }
 
@@ -141,6 +185,7 @@ export function parseProjection(text: string): DashboardState {
   // page about the loop rather than about its history.
   const lastSeen = new Map<string, string>();
   for (const d of decisions) {
+    if (!d.session) continue;
     if (!lastSeen.has(d.session)) lastSeen.set(d.session, d.ts);
   }
 
@@ -155,7 +200,12 @@ export function parseProjection(text: string): DashboardState {
       a.label.localeCompare(b.label),
   );
 
-  return { sessions, decisions, verdicts: verdictMix(decisions) };
+  return {
+    sessions,
+    decisions,
+    verdicts: verdictMix(decisions),
+    recent: { windowHours: 24, verdicts: verdictMix(decisions, Date.now(), 24) },
+  };
 }
 
 /**
@@ -233,13 +283,21 @@ const chip = (kind: string): string => `<span class="chip ${escapeHtml(kind)}">$
 
 export function renderDashboard(state: DashboardState): string {
   const working = state.sessions.filter((s) => s.activeGoal).length;
-  const settled = state.verdicts.reduce((total, v) => total + v.count, 0);
-  const corroborated = state.verdicts.find((v) => v.reason === "judged_complete")?.count ?? 0;
-  const rate = settled ? Math.round((corroborated / settled) * 100) : null;
+  // The honest number is the recent one. All-time is shown beside it rather
+  // than instead of it, because a rate dragged down by settles from before the
+  // judge existed says nothing about whether the judge works now.
+  const rateOf = (mix: readonly { reason: string; count: number }[]) => {
+    const judged = mix.find((v) => v.reason === "judged_complete")?.count ?? 0;
+    const claimed = mix.find((v) => v.reason === "claimed_unverified")?.count ?? 0;
+    return judged + claimed === 0 ? null : Math.round((judged / (judged + claimed)) * 100);
+  };
+  const recentRate = rateOf(state.recent.verdicts);
+  const allTimeRate = rateOf(state.verdicts);
 
-  const verdicts = state.verdicts
-    .map((v) => `<span class="chip v-${escapeHtml(v.reason)}">${escapeHtml(v.reason.replace(/_/g, " "))} <b>${v.count}</b></span>`)
-    .join(" ");
+  const chips = (mix: readonly { reason: string; count: number }[]) =>
+    mix
+      .map((v) => `<span class="chip v-${escapeHtml(v.reason)}">${escapeHtml(v.reason.replace(/_/g, " "))} <b>${v.count}</b></span>`)
+      .join(" ");
 
   const actions = (target: string, label: string) => `<div class="acts" data-target="${escapeHtml(target)}">
       <button data-act="pause">pause</button>
@@ -323,6 +381,9 @@ export function renderDashboard(state: DashboardState): string {
  .verdicts { padding: 10px 20px; border-bottom: 1px solid #1d212b; display: flex;
              gap: 10px; align-items: baseline; flex-wrap: wrap; }
  .verdicts h2 { margin: 0 8px 0 0; }
+ .period { font-size: 10px; text-transform: uppercase; letter-spacing: .12em;
+           color: #6c7387; margin-left: 4px; }
+ .period.alltime { margin-left: 16px; padding-left: 16px; border-left: 1px solid #1d212b; }
  .v-claimed_unverified { background: #341b1b; color: #ef8b85; }
  .v-judged_complete { background: #16351f; color: #79dd9b; }
  .v-judge_unavailable { background: #332c17; color: #ddc472; }
@@ -340,11 +401,14 @@ export function renderDashboard(state: DashboardState): string {
   <span class="stat"><b>${state.sessions.length}</b> sessions</span>
   <span class="stat"><b>${working}</b> working</span>
   <span class="stat"><b>${state.decisions.length}</b> events</span>
-  ${rate === null ? "" : `<span class="stat">claims corroborated <b>${rate}%</b> of ${settled}</span>`}
+  ${recentRate === null ? "" : `<span class="stat">corroborated <b>${recentRate}%</b> in ${state.recent.windowHours}h</span>`}
 </header>
 <div class="verdicts">
   <h2>how claims settled</h2>
-  ${verdicts || '<span class="empty">nothing has settled yet</span>'}
+  <span class="period">last ${state.recent.windowHours}h</span>
+  ${chips(state.recent.verdicts) || '<span class="empty">nothing has settled recently</span>'}
+  <span class="period alltime">all time${allTimeRate === null ? "" : ` · ${allTimeRate}% corroborated`}</span>
+  ${chips(state.verdicts)}
 </div>
 <main>
   <section>
@@ -395,6 +459,8 @@ export function renderDashboard(state: DashboardState): string {
 export function createDashboard(options: {
   port: number;
   readProjection: () => string;
+  /** The event log, which is the record rather than the projection. */
+  readEvents?: () => string;
   /** Append a steering command. Absent means the page is read-only. */
   steer?: (command: { target: string; action: string; value?: string }) => void;
   host?: string;
@@ -410,10 +476,16 @@ export function createDashboard(options: {
   const server = http.createServer((req, res) => {
     const path = (req.url ?? "/").split("?")[0];
     let projection = "";
+    let events = "";
     try {
       projection = options.readProjection();
     } catch {
       projection = "";
+    }
+    try {
+      events = options.readEvents?.() ?? "";
+    } catch {
+      events = "";
     }
 
     // Steering is the one route that changes anything, so it is the one that
@@ -489,7 +561,7 @@ export function createDashboard(options: {
       return;
     }
     if (path === "/api/state") {
-      const state = parseProjection(projection);
+      const state = parseProjection(projection, events);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(state));
       return;
@@ -500,7 +572,7 @@ export function createDashboard(options: {
       return;
     }
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(renderDashboard(parseProjection(projection)));
+    res.end(renderDashboard(parseProjection(projection, events)));
   });
 
   // `listen` reports failure asynchronously, so a try/catch around this call
