@@ -20,6 +20,7 @@
   cfg = config.local.omp.autoLoop;
   canvasEnabled = cfg.jumpCannon.enable && pkgs.stdenv.hostPlatform.isDarwin;
   canvasLabel = "local.omp-auto-loop-jump-cannon";
+  graphProxyLabel = "local.omp-auto-loop-graph-proxy";
 
   # Extension entries for the harness's PI_CONFIG_FILES settings overlay.
   # Modules cannot merge into the harness's `extensions` array directly —
@@ -68,6 +69,16 @@ in {
         type = lib.types.port;
         default = 8799;
         description = "Loopback port for the jump-cannon graph-api.";
+      };
+
+      proxyPort = lib.mkOption {
+        type = lib.types.port;
+        default = 8765;
+        description = ''
+          Loopback port the canvas UI's Sessions view talks to. The port is
+          compiled into the UI, so a reverse proxy forwards it to the
+          graph-api port; changing this does not move the UI's target.
+        '';
       };
 
       lifecycle = lib.mkOption {
@@ -186,6 +197,31 @@ in {
         KeepAlive = cfg.jumpCannon.lifecycle == "always";
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/omp-auto-loop-jump-cannon.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/omp-auto-loop-jump-cannon.log";
+      };
+    };
+
+    # The canvas UI's Sessions view is compiled against :8765, while the
+    # graph-api that answers it runs on the jump-cannon port. Forwarding
+    # rather than reimplementing keeps the upstream contract the real one:
+    # without this the tab calls /graph/init, /graph/ids and /progress on a
+    # port nothing listens on and logs ERR_CONNECTION_REFUSED forever.
+    launchd.agents.omp-auto-loop-graph-proxy = lib.mkIf (canvasEnabled && config.local.omp.enable && cfg.enable) {
+      enable = true;
+      config = {
+        Label = graphProxyLabel;
+        ProgramArguments = [
+          "${pkgs.bun}/bin/bun"
+          "run"
+          "${./graph-proxy.mjs}"
+        ];
+        EnvironmentVariables = {
+          OMP_GRAPH_PROXY_PORT = toString cfg.jumpCannon.proxyPort;
+          OMP_GRAPH_UPSTREAM_PORT = toString cfg.jumpCannon.port;
+        };
+        RunAtLoad = true;
+        KeepAlive = true;
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/omp-auto-loop-graph-proxy.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/omp-auto-loop-graph-proxy.log";
       };
     };
   };
