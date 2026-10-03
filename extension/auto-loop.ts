@@ -695,6 +695,14 @@ export default function (pi: {
             return "";
           }
         },
+        // The log is the record; the projection can be missing a settle.
+        readEvents: () => {
+          try {
+            return readFileSync(statusFile, "utf8");
+          } catch {
+            return "";
+          }
+        },
         onError: (message) => note(`dashboard unavailable: ${message}`),
         onListening: (url) => note(`dashboard: ${url}`),
         steer: (command) => {

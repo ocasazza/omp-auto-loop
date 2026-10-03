@@ -16,10 +16,10 @@ const session = (over: Record<string, string> = {}) => {
 };
 
 const event = (ts: string, kind: string, msg: string) =>
-  `N|e${ts}|${msg}|event|${kind}|ts=${ts};sess=jaeger#1`;
+  JSON.stringify({ ts, session: "jaeger#1", kind, msg });
 
 test("sessions and events are split by node kind", () => {
-  const state = parseProjection([session(), event("2026-01-01T00:00:10Z", "continue", "autonomous continuation 1/3")].join("\n"));
+  const state = parseProjection(session(), event("2026-01-01T00:00:10Z", "continue", "autonomous continuation 1/3"));
 
   assert.equal(state.sessions.length, 1);
   assert.equal(state.decisions.length, 1);
@@ -52,6 +52,7 @@ test("a malformed line costs a row, never the page", () => {
 
 test("events read newest first", () => {
   const state = parseProjection(
+    "",
     [
       event("2026-01-01T00:00:10Z", "continue", "first"),
       event("2026-01-01T00:00:30Z", "settled", "third"),
@@ -106,7 +107,7 @@ test("model text cannot inject markup", () => {
 });
 
 test("an event message cannot inject markup", () => {
-  const state = parseProjection(event("2026-01-01T00:00:10Z", "goal", "<script>alert(1)</script>"));
+  const state = parseProjection("", event("2026-01-01T00:00:10Z", "goal", "<script>alert(1)</script>"));
   const html = renderDashboard(state);
 
   // The page has a script of its own, and the escaped text necessarily still
@@ -168,6 +169,7 @@ test("a taken port reports and does not throw", async () => {
 
 test("the verdict mix separates claims from evidence", () => {
   const state = parseProjection(
+    "",
     [
       event("2026-01-01T00:00:01Z", "settled", "settled: claimed_unverified"),
       event("2026-01-01T00:00:02Z", "settled", "settled: claimed_unverified"),
@@ -185,20 +187,55 @@ test("the verdict mix separates claims from evidence", () => {
 });
 
 test("a non-settle event is not a verdict", () => {
-  const state = parseProjection(event("2026-01-01T00:00:01Z", "continue", "autonomous continuation 1/3"));
+  const state = parseProjection("", event("2026-01-01T00:00:01Z", "continue", "autonomous continuation 1/3"));
   assert.deepEqual(state.verdicts, []);
 });
 
-test("the page states the corroboration rate", () => {
+test("the rate is windowed, so a pre-judge history cannot read as a broken judge", () => {
+  const old = event("2020-01-01T00:00:01Z", "settled", "settled: claimed_unverified");
+  const fresh = event(new Date().toISOString(), "settled", "settled: judged_complete");
+
+  const state = parseProjection("", [old, fresh].join("\n"));
+
+  // All time carries both, and is dragged down by the one from before a judge
+  // existed: 50%, which says nothing about the judge working today.
+  assert.deepEqual(state.verdicts, [
+    { reason: "claimed_unverified", count: 1 },
+    { reason: "judged_complete", count: 1 },
+  ]);
+
+  // The recent window is what says whether the judge works now.
+  assert.equal(state.recent.windowHours, 24);
+  assert.deepEqual(state.recent.verdicts, [{ reason: "judged_complete", count: 1 }]);
+});
+
+test("the page states both windows", () => {
   const state = parseProjection(
+    "",
     [
-      event("2026-01-01T00:00:01Z", "settled", "settled: judged_complete"),
-      event("2026-01-01T00:00:02Z", "settled", "settled: claimed_unverified"),
+      event("2020-01-01T00:00:01Z", "settled", "settled: claimed_unverified"),
+      event(new Date().toISOString(), "settled", "settled: judged_complete"),
     ].join("\n"),
   );
   const html = renderDashboard(state);
 
-  assert.match(html, /claims corroborated <b>50%<\/b> of 2/);
+  assert.match(html, /corroborated <b>100%<\/b> in 24h/);
+  assert.match(html, /all time/);
+  assert.match(html, /last 24h/);
+});
+
+test("the page states the corroboration rate", () => {
+  const now = Date.now();
+  const state = parseProjection(
+    "",
+    [
+      event(new Date(now - 60_000).toISOString(), "settled", "settled: judged_complete"),
+      event(new Date(now - 120_000).toISOString(), "settled", "settled: claimed_unverified"),
+    ].join("\n"),
+  );
+  const html = renderDashboard(state);
+
+  assert.match(html, /corroborated <b>50%<\/b> in 24h/);
   assert.match(html, /how claims settled/);
 });
 
