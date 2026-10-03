@@ -54,19 +54,29 @@ function countOccurrences(text: string, token: string): number {
 }
 
 /**
- * Extract the verdict token. Strict: null for a missing, duplicated, or
- * ambiguous token. Counting is case-sensitive and overlap-aware —
- * "UNVERIFIED" contains "VERIFIED", so the VERIFIED count is the raw count
- * minus the UNVERIFIED count. Exactly one token in total parses; anything
- * else (wrong case, garbage, both tokens, the token twice) is null.
+ * Extract the verdict token.
+ *
+ * The rubric asks for one token on the LAST line, so that is what is parsed.
+ * Counting the whole reply made a rationale that merely mentioned the word
+ * ("the claim is not verified — VERIFIED") look like two tokens and degrade a
+ * healthy judge to judge_unavailable; the prose is where ambiguity belongs
+ * and the token is the only thing that decides.
+ *
+ * Strict within that line: case-sensitive, overlap-aware ("UNVERIFIED"
+ * contains "VERIFIED"), and null unless exactly one token appears. Both
+ * tokens, a duplicated token, wrong case, or no token are all null.
  */
 export function parseJudgeVerdict(text: string): JudgeVerdict | null {
-  const unverified = countOccurrences(text, UNVERIFIED_TOKEN);
-  const verified = countOccurrences(text, VERIFIED_TOKEN) - unverified;
+  const rationale = text.trim();
+  const lastLine = rationale.slice(rationale.lastIndexOf("\n") + 1);
+
+  const unverified = countOccurrences(lastLine, UNVERIFIED_TOKEN);
+  const verified = countOccurrences(lastLine, VERIFIED_TOKEN) - unverified;
   if (verified + unverified !== 1) return null;
+
   return verified === 1
-    ? { ok: true, done: true, rationale: text.trim() }
-    : { ok: true, done: false, rationale: text.trim() };
+    ? { ok: true, done: true, rationale }
+    : { ok: true, done: false, rationale };
 }
 
 /** Transcript message roles that carry command output worth judging. */

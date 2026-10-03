@@ -15,7 +15,7 @@ test("buildJudgePrompt labels the reply as an untrusted self-report", () => {
   assert.match(p, /42 passed/);
 });
 
-test("parseJudgeVerdict is strict about the token", () => {
+test("parseJudgeVerdict is strict about the token on the final line", () => {
   assert.equal(parseJudgeVerdict("All good.\nVERIFIED")?.done, true);
   assert.equal(parseJudgeVerdict("No output.\nUNVERIFIED")?.done, false);
   // UNVERIFIED contains VERIFIED: the overlap correction is load-bearing.
@@ -23,11 +23,44 @@ test("parseJudgeVerdict is strict about the token", () => {
   assert.equal(parseJudgeVerdict("Reasoning.\nMore.\nVERIFIED")?.done, true);
 
   assert.equal(parseJudgeVerdict("VERIFIED or UNVERIFIED"), null);
-  assert.equal(parseJudgeVerdict("VERIFIED\nVERIFIED"), null);
+  assert.equal(parseJudgeVerdict("VERIFIED UNVERIFIED"), null);
   assert.equal(parseJudgeVerdict("probably fine"), null);
   assert.equal(parseJudgeVerdict("verified"), null);
   assert.equal(parseJudgeVerdict(""), null);
   assert.equal(parseJudgeVerdict("   \n "), null);
+});
+
+// Regression: the rubric asks for a rationale sentence and then one token.
+// Counting the WHOLE reply meant a rationale that merely used the word
+// ("the claim is not verified") put the count at two and degraded a healthy
+// judge to judge_unavailable. Only the final line carries the verdict.
+test("a verdict word in the rationale does not confuse the parser", () => {
+  const ok = parseJudgeVerdict(
+    "The evidence shows 42 tests passed, which substantiates the claim. VERIFIED",
+  );
+  assert.equal(ok?.ok, true);
+  assert.equal(ok?.done, true);
+
+  const bad = parseJudgeVerdict("No evidence was produced, so this is unverified. UNVERIFIED");
+  assert.equal(bad?.done, false);
+
+  // The case that actually broke it: the rationale uses the token verbatim, so
+  // the whole-reply count saw two and reported judge_unavailable for a judge
+  // that had answered perfectly well. Counting is case-sensitive, so the
+  // lowercase wording above never triggered it.
+  const caps = parseJudgeVerdict("The evidence is missing, so this cannot be VERIFIED.\nUNVERIFIED");
+  assert.equal(caps?.ok, true);
+  assert.equal(caps?.done, false);
+});
+
+test("the rationale is preserved verbatim for the continuation text", () => {
+  const v = parseJudgeVerdict("The run passed.\nVERIFIED");
+  assert.equal(v?.rationale, "The run passed.\nVERIFIED");
+});
+
+test("trailing whitespace after the token still parses", () => {
+  assert.equal(parseJudgeVerdict("reasoning\nVERIFIED\n\n  ")?.done, true);
+  assert.equal(parseJudgeVerdict("reasoning\nUNVERIFIED  \n")?.done, false);
 });
 
 test("extractEvidence collects tool output, newest first, bounded", () => {
