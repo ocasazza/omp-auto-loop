@@ -38,6 +38,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { readFileSync } from 'fs';
 import { registerCommands } from './lib/commands'; // NEW import for commands
+import { createDashboard } from './lib/dashboard.ts';
 import type { ExtensionCommandContext, AutocompleteItem } from '@oh-my-pi/pi-coding-agent';
 
 import { type } from "@oh-my-pi/omptype";
@@ -507,6 +508,11 @@ export default function (pi: {
     Date.now(),
   );
 
+  // The loop's own human surface. `dashboardPort` was reserved in config from
+  // the start and nothing served it, so `/autoloop open-dashboard` opened the
+  // jump-cannon canvas instead -- five thousand nodes answering a different
+  // question. Read-only, loopback, and best-effort: a port already taken must
+  // not stop the loop from running.
   // Call sites need lockstep reset semantics: a new cycle is a new budget.
   // The gate attempt ledger belongs to that budget. Without clearing it here,
   // a gate that burned its retries stays exhausted for the lifetime of the
@@ -625,6 +631,27 @@ export default function (pi: {
     else if (msg.startsWith("cycle stopped")) outcome = "timeout";
     sink.emit(msg, Date.now(), sessionState());
   };
+
+  let dashboard: { close: () => void; url: string } | undefined;
+  if (getEffective().dashboardPort > 0) {
+    try {
+      dashboard = createDashboard({
+        port: getEffective().dashboardPort,
+        readProjection: () => {
+          try {
+            return readFileSync(`${stateDir}/graph.lines`, "utf8");
+          } catch {
+            return "";
+          }
+        },
+        onError: (message) => note(`dashboard unavailable: ${message}`),
+      });
+      note(`dashboard: ${dashboard.url}`);
+    } catch (error) {
+      note(`dashboard unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
 
   function sessionIdle(): boolean {
     const isIdle = loopState.lastCtx?.isIdle;
