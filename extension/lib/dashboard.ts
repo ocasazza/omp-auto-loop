@@ -11,6 +11,8 @@
 // decision history. Parsing is pure and separate from serving so it can be
 // tested without a socket or a filesystem.
 
+import { ALL_SESSIONS } from "./control.ts";
+
 export interface SessionRow {
   readonly id: string;
   readonly label: string;
@@ -37,6 +39,30 @@ export interface DecisionRow {
 export interface DashboardState {
   readonly sessions: readonly SessionRow[];
   readonly decisions: readonly DecisionRow[];
+  /** How completion claims resolve, which is what the loop is here to improve. */
+  readonly verdicts: readonly { readonly reason: string; readonly count: number }[];
+}
+
+/**
+ * The signal the loop exists to move: of the claims that settled, how many were
+ * corroborated rather than merely asserted. `claimed_unverified` is the loop
+ * taking the agent's word; `judged_complete` is evidence; `judge_unavailable`
+ * is the judge failing open, which is a defect in the judge and not in the
+ * agent. A rising `claimed_unverified` share means steering is getting weaker.
+ */
+export function verdictMix(decisions: readonly DecisionRow[]): { reason: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const d of decisions) {
+    if (!d.message.startsWith("settled: ")) continue;
+    const reason = d.message.slice("settled: ".length).trim() || "unknown";
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  // Count first, then name: ties would otherwise follow whichever order the
+  // feed happened to be in, and a strip that reorders between refreshes reads
+  // as though the numbers moved.
+  return [...counts.entries()]
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
 }
 
 /** A node line is `N|id|title|kind|tags|props|body?` (see observation.ts). */
@@ -129,7 +155,7 @@ export function parseProjection(text: string): DashboardState {
       a.label.localeCompare(b.label),
   );
 
-  return { sessions, decisions };
+  return { sessions, decisions, verdicts: verdictMix(decisions) };
 }
 
 /**
@@ -142,6 +168,9 @@ export function clamp(text: string, max = 160): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
 }
+
+/** The actions a caller may send. Anything else is refused, not ignored. */
+const SENDABLE: readonly string[] = ["pause", "resume", "disable", "enable", "goal"];
 
 /** Everything on this page comes from model-written text. Escape all of it. */
 export function escapeHtml(text: string): string {
@@ -204,6 +233,21 @@ const chip = (kind: string): string => `<span class="chip ${escapeHtml(kind)}">$
 
 export function renderDashboard(state: DashboardState): string {
   const working = state.sessions.filter((s) => s.activeGoal).length;
+  const settled = state.verdicts.reduce((total, v) => total + v.count, 0);
+  const corroborated = state.verdicts.find((v) => v.reason === "judged_complete")?.count ?? 0;
+  const rate = settled ? Math.round((corroborated / settled) * 100) : null;
+
+  const verdicts = state.verdicts
+    .map((v) => `<span class="chip v-${escapeHtml(v.reason)}">${escapeHtml(v.reason.replace(/_/g, " "))} <b>${v.count}</b></span>`)
+    .join(" ");
+
+  const actions = (target: string, label: string) => `<div class="acts" data-target="${escapeHtml(target)}">
+      <button data-act="pause">pause</button>
+      <button data-act="resume">resume</button>
+      <button data-act="disable">disable</button>
+      <button data-act="enable">enable</button>
+      <button data-act="goal" data-prompt="new objective for ${escapeHtml(label)}">set goal</button>
+    </div>`;
   // Working sessions first, then the most recently heard from. Capped: the
   // projection keeps a hub per process ever seen, and a wall of long-dead
   // sessions buries the handful that matter.
@@ -221,6 +265,7 @@ export function renderDashboard(state: DashboardState): string {
         <br><span class="dim">${escapeHtml(seen || "not seen this run")}</span></td>
       <td class="budget">${budget}<br><span class="dim">${s.heartbeats} nudges</span></td>
       <td class="goal" title="${escapeHtml(clamp(s.goal, 400))}">${escapeHtml(clamp(s.goal) || "—")}</td>
+      <td class="acts-col">${actions(s.label, s.label)}</td>
     </tr>`;
     })
     .join("");
@@ -275,6 +320,19 @@ export function renderDashboard(state: DashboardState): string {
  .chip.continue { background: #332c17; color: #ddc472; }
  .chip.gate { background: #341b1b; color: #ef8b85; }
  .empty { color: #5f6678; padding: 6px 0; }
+ .verdicts { padding: 10px 20px; border-bottom: 1px solid #1d212b; display: flex;
+             gap: 10px; align-items: baseline; flex-wrap: wrap; }
+ .verdicts h2 { margin: 0 8px 0 0; }
+ .v-claimed_unverified { background: #341b1b; color: #ef8b85; }
+ .v-judged_complete { background: #16351f; color: #79dd9b; }
+ .v-judge_unavailable { background: #332c17; color: #ddc472; }
+ .acts-col { width: 15%; }
+ .acts { display: flex; gap: 3px; flex-wrap: wrap; }
+ .acts button { font: inherit; font-size: 10px; padding: 2px 6px; cursor: pointer;
+                background: #1d212b; color: #aeb5c4; border: 1px solid #2a3040;
+                border-radius: 3px; }
+ .acts button:hover { background: #262c39; color: #e8ebf2; }
+ .acts button:disabled { opacity: .5; cursor: default; }
 </style></head>
 <body>
 <header>
@@ -282,7 +340,12 @@ export function renderDashboard(state: DashboardState): string {
   <span class="stat"><b>${state.sessions.length}</b> sessions</span>
   <span class="stat"><b>${working}</b> working</span>
   <span class="stat"><b>${state.decisions.length}</b> events</span>
+  ${rate === null ? "" : `<span class="stat">claims corroborated <b>${rate}%</b> of ${settled}</span>`}
 </header>
+<div class="verdicts">
+  <h2>how claims settled</h2>
+  ${verdicts || '<span class="empty">nothing has settled yet</span>'}
+</div>
 <main>
   <section>
     <h2>sessions — working first</h2>
@@ -294,7 +357,32 @@ export function renderDashboard(state: DashboardState): string {
     ${feed ? `<ul>${feed}</ul>` : '<p class="empty">no events recorded yet</p>'}
   </section>
 </main>
-</body></html>
+<script>
+ document.addEventListener("click", async (clicked) => {
+   const button = clicked.target.closest("button[data-act]");
+   if (!button) return;
+   const action = button.dataset.act;
+   const target = button.closest("[data-target]").dataset.target;
+   let value;
+   if (action === "goal") {
+     value = prompt(button.dataset.prompt || "new objective");
+     if (!value || !value.trim()) return;
+   }
+   button.disabled = true;
+   try {
+     const response = await fetch("/api/action", {
+       method: "POST",
+       headers: { "content-type": "application/json" },
+       body: JSON.stringify({ target, action, value }),
+     });
+     const body = await response.json();
+     button.textContent = response.ok ? "sent" : (body.error || "failed");
+     setTimeout(() => location.reload(), 700);
+   } catch (error) {
+     button.textContent = "failed";
+   }
+ });
+</script></body></html>
 `;
 }
 
@@ -307,8 +395,12 @@ export function renderDashboard(state: DashboardState): string {
 export function createDashboard(options: {
   port: number;
   readProjection: () => string;
+  /** Append a steering command. Absent means the page is read-only. */
+  steer?: (command: { target: string; action: string; value?: string }) => void;
   host?: string;
   onError?: (message: string) => void;
+  /** Fired only once the port is actually bound, so nobody announces a URL that never came up. */
+  onListening?: (url: string) => void;
 }): { close: () => void; url: string } {
   const host = options.host ?? "127.0.0.1";
   // Imported lazily so the pure half of this module stays importable without
@@ -324,6 +416,78 @@ export function createDashboard(options: {
       projection = "";
     }
 
+    // Steering is the one route that changes anything, so it is the one that
+    // has to be hard to reach by accident. Three gates, none of them optional:
+    //
+    //   * POST only — a GET can be triggered by an <img> tag on any page.
+    //   * `application/json` required, and no CORS headers ever sent, so a
+    //     cross-origin caller cannot send it: a JSON content type is not a
+    //     CORS-simple request, the preflight fails, and the browser never
+    //     sends the POST. That is what stops another page steering the loop.
+    //   * loopback bind, so it is not reachable off the machine at all.
+    if (path === "/api/action") {
+      if (req.method !== "POST") {
+        res.writeHead(405, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "POST only" }));
+        return;
+      }
+      if (!(req.headers["content-type"] ?? "").includes("application/json")) {
+        res.writeHead(415, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "content-type must be application/json" }));
+        return;
+      }
+      if (!options.steer) {
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "steering is not enabled" }));
+        return;
+      }
+
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+        // A steering command is a few hundred bytes; a large body is not one.
+        if (body.length > 8_192) req.destroy();
+      });
+      req.on("end", () => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(body || "{}");
+        } catch {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "malformed json" }));
+          return;
+        }
+        const record = (parsed ?? {}) as Record<string, unknown>;
+        const action = typeof record.action === "string" ? record.action : "";
+        const target = typeof record.target === "string" && record.target ? record.target : ALL_SESSIONS;
+        if (!SENDABLE.includes(action)) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: `unknown action: ${action}` }));
+          return;
+        }
+        // An objective with no text would leave the loop with an active goal
+        // that names nothing, which is the shape of record the projection
+        // refuses to write.
+        if (action === "goal" && !(typeof record.value === "string" && record.value.trim())) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "goal needs a non-empty objective" }));
+          return;
+        }
+        try {
+          options.steer?.({
+            target,
+            action,
+            value: typeof record.value === "string" ? record.value : undefined,
+          });
+          res.writeHead(202, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: true, target, action }));
+        } catch (error) {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: String(error) }));
+        }
+      });
+      return;
+    }
     if (path === "/api/state") {
       const state = parseProjection(projection);
       res.writeHead(200, { "content-type": "application/json" });
@@ -343,8 +507,12 @@ export function createDashboard(options: {
   // catches nothing: a taken port surfaces as an 'error' event, and an
   // unhandled one takes the whole process down — the loop dies because its
   // dashboard could not have a port. Report and stay up instead.
+  const url = `http://${host}:${options.port}/`;
   server.on("error", (error: Error) => {
     options.onError?.(error.message);
+  });
+  server.on("listening", () => {
+    options.onListening?.(url);
   });
   server.listen(options.port, host);
 
@@ -356,6 +524,6 @@ export function createDashboard(options: {
         // Already closed, or never bound: nothing to release.
       }
     },
-    url: `http://${host}:${options.port}/`,
+    url,
   };
 }
