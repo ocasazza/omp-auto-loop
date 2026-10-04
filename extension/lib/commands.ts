@@ -127,8 +127,7 @@ Status: ${loopState.disabled ? 'Disabled' : loopState.paused ? 'Paused' : 'Enabl
             }
 
             // (d) jump-cannon graph-api reachable
-            const dashboardPort = effectiveConfig.dashboardPort;
-            const healthzUrl = `http://127.0.0.1:${dashboardPort}/healthz`;
+            const healthzUrl = `http://127.0.0.1:${effectiveConfig.graphApiPort}/healthz`;
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 1500); // 1.5s timeout
             try {

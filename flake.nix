@@ -55,13 +55,24 @@
     checks = forAllSystems (
       system: let
         pkgs = nixpkgs.legacyPackages.${system};
+        # The one runtime dependency the entry imports. Locally bun fetches it
+        # on demand; the sandbox has no network, so it is pinned to bun.lock's
+        # integrity hash.
+        omptype = pkgs.fetchurl {
+          url = "https://registry.npmjs.org/@oh-my-pi/omptype/-/omptype-18.4.10.tgz";
+          hash = "sha512-ECtpjcs0S9ciiruXCAhUInOGR0UoMYA9n0ktkshb8JvGmZPHsxInsEYDVuqUuYLoNCk6FY1/wGx9aphjSdUfkQ==";
+        };
       in {
-        # The full node:test suite (test/*.test.ts) under bun.
+        # The full node:test suite (test/*.test.ts) under bun. git lets the
+        # gate tests attest a real worktree instead of skipping.
         tests = pkgs.stdenv.mkDerivation {
           name = "omp-auto-loop-tests";
           src = ./.;
-          nativeBuildInputs = [pkgs.bun];
+          nativeBuildInputs = [pkgs.bun pkgs.git];
           buildPhase = ''
+            export HOME=$TMPDIR
+            mkdir -p node_modules/@oh-my-pi/omptype
+            tar -xzf ${omptype} -C node_modules/@oh-my-pi/omptype --strip-components=1
             bun test test/
           '';
           installPhase = ''

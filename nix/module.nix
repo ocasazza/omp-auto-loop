@@ -53,6 +53,16 @@ in {
       '';
     };
 
+    dashboardPort = lib.mkOption {
+      type = lib.types.port;
+      default = 8798;
+      description = ''
+        Loopback port for the loop's own dashboard (review, steering,
+        taxonomy). The first omp session to start serves it. Must differ
+        from jumpCannon.port.
+      '';
+    };
+
     jumpCannon = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -148,13 +158,15 @@ in {
         canvasEnabled && cfg.jumpCannon.lifecycle == "omp"
       ) {text = canvasLabel;};
 
-      # Shared runtime config: commands.ts reads dashboardPort to manage the
-      # canvas agent; imp-bridge.ts reads the impBridge block (enable must
-      # be exactly true). Emitted whenever the extension is on — including
-      # lifecycle == "always", where no canvas-agent file exists.
+      # Shared runtime config: the extension binds dashboardPort; `doctor`
+      # health-checks the graph-api on graphApiPort; imp-bridge.ts reads the
+      # impBridge block (enable must be exactly true). Emitted whenever the
+      # extension is on — including lifecycle == "always", where no
+      # canvas-agent file exists.
       "omp-auto-loop/config.json".text = builtins.toJSON {
         version = 1;
-        dashboardPort = cfg.jumpCannon.port;
+        dashboardPort = cfg.dashboardPort;
+        graphApiPort = cfg.jumpCannon.port;
         impBridge = {
           enable = cfg.impBridge.enable;
           url = cfg.impBridge.url;

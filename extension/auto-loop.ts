@@ -38,7 +38,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { readFileSync } from 'fs';
 import { registerCommands } from './lib/commands'; // NEW import for commands
-import { createDashboard } from './lib/dashboard.ts';
+import { createDashboard, parseEvents, verdictMix } from './lib/dashboard.ts';
 import { encodeCommand, selectCommands, type ControlCommand, type ControlAction } from './lib/control.ts';
 import type { ExtensionCommandContext, AutocompleteItem } from '@oh-my-pi/pi-coding-agent';
 
@@ -85,6 +85,20 @@ import {
 import { CanvasLifecycle } from "./lib/canvas.ts";
 import type { FsPort } from "./lib/ports.ts";
 import { replayCycle, type LoopEvent } from "./lib/resume.ts";
+import {
+  criteriaFor,
+  encodeOp,
+  flag,
+  foldPolicy,
+  gatesFor,
+  nextQueued,
+  promptText,
+  EMPTY_POLICY,
+  type Policy,
+  type PolicyOp,
+} from "./lib/policy.ts";
+import { chatFromEnv } from "./lib/model.ts";
+import { proposeImprovement } from "./lib/reflect.ts";
 
 // XDG path resolution
 export const XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
@@ -100,7 +114,7 @@ try {
   const parsedConfig = JSON.parse(configContent);
   if (parsedConfig.version === 1) {
     fileConfig.dashboardPort = parsedConfig.dashboardPort;
-    // Add other general keys from config.json if they exist and are not impBridge
+    if (typeof parsedConfig.graphApiPort === "number") fileConfig.graphApiPort = parsedConfig.graphApiPort;
   }
 } catch (e: any) {
   console.error(`[auto-loop] Failed to read or parse config.json at ${AUTO_LOOP_CONFIG_FILE}: ${e.message}`);
@@ -227,15 +241,6 @@ async function worktreeSnapshot(
 
 const DONE_MARKER = "AUTOLOOP:DONE";
 
-// Adapted from prime-agent DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT.
-const CONTINUATION_DIRECTIVE =
-  "No human input is available while the autonomous loop is running. " +
-  "Continue working until the task is complete or the loop's limits stop " +
-  "the run. If you were about to ask the user a question, make a reasonable " +
-  "assumption and verify it. If you believe you are blocked, prove it with " +
-  "host-observable evidence (command output, file state), preserve that " +
-  "evidence, and keep looking for safe progress while budget remains.";
-
 export interface GoalState {
   status: "idle" | "active" | "paused" | "complete";
   objective: string;
@@ -323,6 +328,41 @@ export default function (pi: {
     });
   };
 
+  // Every note() lands in the event log (JSONL, one line per event) that
+  // resumeFromLog replays, and in graph.lines, the projection the jump-cannon
+  // canvas imports. Policy and control files sit beside it.
+  const statusFile =
+    process.env.OMP_AUTO_LOOP_STATUS_FILE ??
+    `${process.env.XDG_STATE_HOME ?? `${process.env.HOME ?? ""}/.local/state`}/omp-auto-loop/events.jsonl`;
+  const stateDir = dirname(statusFile);
+  const policyFile = `${stateDir}/policy.jsonl`;
+
+  // The operator's policy, re-folded only when the file changes: the settle
+  // path reads it on every decision and the log is append-only.
+  let policyCache: { mtimeMs: number; size: number; policy: Policy } | undefined;
+  const readPolicy = (): Policy => {
+    let st: { mtimeMs: number; size: number };
+    try {
+      st = statSync(policyFile);
+    } catch {
+      return EMPTY_POLICY;
+    }
+    if (policyCache && policyCache.mtimeMs === st.mtimeMs && policyCache.size === st.size) return policyCache.policy;
+    let text = "";
+    try {
+      text = readFileSync(policyFile, "utf8");
+    } catch {
+      return EMPTY_POLICY;
+    }
+    policyCache = { mtimeMs: st.mtimeMs, size: st.size, policy: foldPolicy(text) };
+    return policyCache.policy;
+  };
+  // O_APPEND: one op, one write, so concurrent writers never interleave.
+  const appendPolicy = (op: PolicyOp, by: string): void => {
+    mkdirSync(stateDir, { recursive: true });
+    appendFileSync(policyFile, encodeOp(op, Date.now(), by));
+  };
+
   // Create a bound getEffectiveConfig for use within the extension
   const getEffective = getEffectiveConfig({
     piHasUI: pi.hasUI,
@@ -331,6 +371,13 @@ export default function (pi: {
     envInt,
     envStringArray,
     DEFAULT_SESSION_CONFIG,
+    livePolicy: () => {
+      const { maxContinuations, timeoutMs } = readPolicy().params;
+      return {
+        ...(maxContinuations !== undefined ? { maxContinuations } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      };
+    },
   });
 
   const actions: LoopActions = {
@@ -360,7 +407,7 @@ export default function (pi: {
       };
       // The goal tool will call persistGoal, so no need to call it here directly
       actions.newCycle(); // Start a new cycle for the new goal
-      note(`goal set: ${text.slice(0, 120)}`);
+      note(`goal set: ${text.slice(0, 400)}`);
     },
     setPaused: (paused: boolean) => {
       loopState.paused = paused;
@@ -437,67 +484,32 @@ export default function (pi: {
     nowMs: () => Date.now(),
   };
 
-  // The judge is disabled unless OMP_AUTO_LOOP_JUDGE_MODEL is set, so an
-  // unconfigured deployment settles a bare claim exactly as before. The
-  // default endpoint is omp's loopback Envoy AI Gateway proxy, which stays up
-  // when the laptop-cluster forwarder on :8000 does not; loopback-only, so no
-  // credential handling belongs here.
+  // The judge and the reflect pass share one model, disabled unless
+  // OMP_AUTO_LOOP_JUDGE_MODEL is set, so an unconfigured deployment settles a
+  // bare claim exactly as before. The default endpoint is omp's loopback Envoy
+  // AI Gateway proxy.
   const JUDGE_MAX_TOKENS = 96;
   const JUDGE_EVIDENCE_MAX_CHARS = 4000;
-  const judgePort: JudgePort | undefined = process.env.OMP_AUTO_LOOP_JUDGE_MODEL
+  const chat = chatFromEnv(process.env);
+  const judgePort: JudgePort | undefined = chat
     ? {
         judge: async (request): Promise<JudgeVerdict> => {
-          const model = process.env.OMP_AUTO_LOOP_JUDGE_MODEL as string;
-          const baseUrl =
-            process.env.OMP_AUTO_LOOP_JUDGE_BASE_URL ?? "http://127.0.0.1:22000/v1";
-          const timeoutMs = Number(process.env.OMP_AUTO_LOOP_JUDGE_TIMEOUT_MS ?? 30000);
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), timeoutMs);
-          try {
-            const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                model,
-                messages: [{ role: "user", content: buildJudgePrompt(request) }],
-                temperature: 0,
-                max_tokens: JUDGE_MAX_TOKENS,
-              }),
-              signal: controller.signal,
-            });
-            if (!response.ok) {
-              return { ok: false, done: false, rationale: `judge HTTP ${response.status}` };
-            }
-            const payload = record(await response.json());
-            const choices = payload && Array.isArray(payload.choices) ? payload.choices : [];
-            const content = record(record(choices[0])?.message)?.content;
-            const verdict = typeof content === "string" ? parseJudgeVerdict(content) : null;
-            if (!verdict) {
-              return {
-                ok: false,
-                done: false,
-                rationale: "unparseable judge reply",
-              };
-            }
-            return verdict;
-          } catch (error) {
-            const reason = error instanceof Error ? error.message : String(error);
-            return { ok: false, done: false, rationale: `judge request failed: ${reason}` };
-          } finally {
-            clearTimeout(timer);
-          }
+          // Global criteria, then this repo's definition of done.
+          const policy = readPolicy();
+          const criteria = [promptText(policy, "judgeCriteria"), criteriaFor(policy, repoName())]
+            .filter((c) => c.trim())
+            .join("\n");
+          const reply = await chat.complete(
+            buildJudgePrompt(request, criteria),
+            JUDGE_MAX_TOKENS,
+          );
+          if (!reply.ok) return { ok: false, done: false, rationale: `judge ${reply.error}` };
+          return parseJudgeVerdict(reply.text) ?? { ok: false, done: false, rationale: "unparseable judge reply" };
         },
       }
     : undefined;
 
-  // Every note() lands in the event log (JSONL, one line per event) that
-  // resumeFromLog replays, and in graph.lines, the projection the jump-cannon
-  // canvas imports.
-  const statusFile =
-    process.env.OMP_AUTO_LOOP_STATUS_FILE ??
-    `${process.env.XDG_STATE_HOME ?? `${process.env.HOME ?? ""}/.local/state`}/omp-auto-loop/events.jsonl`;
   const sessionLabel = `${basename(process.cwd())}#${process.pid}`;
-  const stateDir = dirname(statusFile);
   const sink = new ObservationSink(
     nodeFs,
     {
@@ -523,6 +535,12 @@ export default function (pi: {
     // No channel yet: the first command creates it.
   }
 
+  /** Set a goal and hand its full text to the agent, which a note truncates. */
+  const startGoal = (objective: string, why: string): void => {
+    actions.setGoal(objective);
+    pi.sendUserMessage(`[auto-loop] ${why}: ${objective}`);
+  };
+
   const applyCommand = (command: ControlCommand): void => {
     switch (command.action) {
       case "pause":
@@ -538,8 +556,26 @@ export default function (pi: {
         actions.enable();
         break;
       case "goal":
-        if (command.value) actions.setGoal(command.value);
+        if (command.value) startGoal(command.value, "new goal from the operator");
         break;
+      case "guide":
+        // Labelled as the operator's words, so the agent can tell steering
+        // from its own tool output.
+        if (command.value) pi.sendUserMessage(`[operator guidance] ${command.value}`);
+        break;
+      case "reopen": {
+        // A human overturned this session's "done": the same goal goes back to
+        // work on a fresh budget, with the reason in the agent's context.
+        if (!loopState.goal.objective) break;
+        loopState.goal = { ...loopState.goal, status: "active" };
+        actions.newCycle();
+        persistGoal();
+        pi.sendUserMessage(
+          `[operator] Your completion was not accepted${command.value ? `: ${command.value}` : "."} ` +
+            `Keep working on: ${loopState.goal.objective}`,
+        );
+        break;
+      }
     }
     note(`steered: ${command.action}${command.value ? ` — ${command.value.slice(0, 80)}` : ""}`);
   };
@@ -551,7 +587,7 @@ export default function (pi: {
     } catch {
       return;
     }
-    const selected = selectCommands(text, sessionLabel, controlCursor);
+    const selected = selectCommands(text, [sessionLabel, sessionState().label], controlCursor);
     controlCursor = selected.cursor;
     for (const command of selected.commands) applyCommand(command);
   };
@@ -656,7 +692,7 @@ export default function (pi: {
       parentKey: (parentId && agentKeys.get(parentId)) || null,
       repo: repoFor(cwd),
       goal: loopState.goal.status === "idle" ? null : { objective: loopState.goal.objective, status: loopState.goal.status },
-      gates: getEffective().gateCommands,
+      gates: gateCommandsNow(getEffective()),
       model: typeof model?.id === "string" ? model.id : null,
       continuations: loopState.continuations,
       maxContinuations: getEffective().maxContinuations,
@@ -683,27 +719,76 @@ export default function (pi: {
     sink.emit(msg, Date.now(), sessionState());
   };
 
+  const readText = (file: string): string => {
+    try {
+      return readFileSync(file, "utf8");
+    } catch {
+      return "";
+    }
+  };
+
+  /** Run the reflect pass over the log and file its proposal, if the model gives a usable one. */
+  const proposeNow = (source: string) => {
+    if (!chat) return Promise.resolve({ ok: false as const, error: "no model configured (OMP_AUTO_LOOP_JUDGE_MODEL)" });
+    const rows = parseEvents(readText(statusFile));
+    return proposeImprovement({
+      chat,
+      policy: readPolicy(),
+      events: rows.map((d) => ({ ts: d.ts, session: d.session, msg: d.message })),
+      limits: { maxContinuations: getEffective().maxContinuations, timeoutMs: getEffective().timeoutMs },
+      mix: verdictMix(rows, Date.now(), 24),
+      append: (op) => appendPolicy(op, source),
+      source,
+      nowMs: Date.now(),
+    });
+  };
+
+  /** The repo a session works in: its shared git root's name, else its cwd's. */
+  const repoName = (): string => repoFor(ctxCwd())?.name ?? basename(ctxCwd());
+
+  /**
+   * Gates for this session: the dashboard's per-repo set wins, then
+   * OMP_AUTO_LOOP_GATES / config.json. Read per settle, so a gate configured
+   * on the dashboard applies to the next claim.
+   */
+  const gateCommandsNow = (config: SessionConfig): string[] => {
+    const fromPolicy = gatesFor(readPolicy(), repoName());
+    return fromPolicy.length > 0 ? [...fromPolicy] : (config.gateCommands ?? []);
+  };
+
+  const afterSettle = (): void => {
+    const policy = readPolicy();
+    if (flag(policy, "queueAutoPull")) {
+      const item = nextQueued(policy, repoName());
+      if (item) {
+        // Claim, then re-read: the log's order decides a race, so only the
+        // session whose claim landed first takes the goal.
+        appendPolicy({ op: "queue.claim", id: item.id, session: sessionLabel }, sessionLabel);
+        if (readPolicy().queue.find((q) => q.id === item.id)?.claimedBy === sessionLabel) {
+          startGoal(item.objective, "next goal from the queue");
+        }
+      }
+    }
+    if (flag(policy, "reflect")) void proposeNow(sessionLabel);
+  };
+
   let dashboard: { close: () => void; url: string } | undefined;
   if (getEffective().dashboardPort > 0) {
     try {
       dashboard = createDashboard({
         port: getEffective().dashboardPort,
-        readProjection: () => {
-          try {
-            return readFileSync(`${stateDir}/graph.lines`, "utf8");
-          } catch {
-            return "";
-          }
-        },
+        readProjection: () => readText(`${stateDir}/graph.lines`),
         // The log is the record; the projection can be missing a settle.
-        readEvents: () => {
-          try {
-            return readFileSync(statusFile, "utf8");
-          } catch {
-            return "";
-          }
+        readEvents: () => readText(statusFile),
+        readPolicy: () => readText(policyFile),
+        writePolicy: (op) => appendPolicy(op, "dashboard"),
+        limits: () => ({ maxContinuations: getEffective().maxContinuations, timeoutMs: getEffective().timeoutMs }),
+        reflect: () => proposeNow("dashboard"),
+        // Another session already serving the port is the normal case on a
+        // host running more than one session; only a real failure is news.
+        onError: (message) => {
+          if (!/in use|EADDRINUSE/i.test(message)) note(`dashboard unavailable: ${message}`);
         },
-        onError: (message) => note(`dashboard unavailable: ${message}`),
         onListening: (url) => note(`dashboard: ${url}`),
         steer: (command) => {
           // Append, never rewrite: every session reads this file and appends
@@ -721,8 +806,6 @@ export default function (pi: {
           );
         },
       });
-      // Only on a real bind: announcing a URL that never came up sends
-      // whoever reads the log looking for a page that is not there.
     } catch (error) {
       note(`dashboard unavailable: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -814,7 +897,7 @@ export default function (pi: {
       const stopReason = lastAssistantText(event);
       // The decision core is pure: it takes observed facts, not ports. Gates
       // are evidence, so they run HERE and their aggregate is passed in.
-      const gateCommands = currentConfig.gateCommands ?? [];
+      const gateCommands = gateCommandsNow(currentConfig);
       let gateOutcome: GateSetOutcome | undefined;
       if (gateCommands.length > 0) {
         const run = await runGateSet(
@@ -845,7 +928,11 @@ export default function (pi: {
         });
         if (verdict.ok) {
           judgeVerdict = { done: verdict.done, rationale: verdict.rationale };
-          note(`judge verdict: ${verdict.done ? "VERIFIED" : "UNVERIFIED"}`);
+          // The reason travels with the verdict so a human reviewing it later
+          // sees why, not just what.
+          const first = verdict.rationale.split("\n")[0]!.trim().slice(0, 240);
+          const reason = first === "VERIFIED" || first === "UNVERIFIED" ? "" : first;
+          note(`judge verdict: ${verdict.done ? "VERIFIED" : "UNVERIFIED"}${reason ? ` — ${reason}` : ""}`);
         } else {
           judgeUnavailable = true;
           note(`judge unavailable: ${verdict.rationale}`);
@@ -879,13 +966,14 @@ export default function (pi: {
       if (decision.kind === "continue") {
         loopState.continuations = decision.continuations;
         loopState.goal.continuationsUsed++;
-        pi.sendMessage(CONTINUATION_DIRECTIVE);
+        pi.sendMessage(promptText(readPolicy(), "continuation"));
         loopState.scheduledContinuation = true;
         note(
           `autonomous continuation: ${loopState.continuations}/${currentConfig.maxContinuations}. ${decision.reason ?? "no claim"}`,
         );
       } else if (decision.kind === "settle") {
         note(`settled: ${decision.reason}`);
+        afterSettle();
       }
     }
     // Ensure all timeouts/intervals are cleared

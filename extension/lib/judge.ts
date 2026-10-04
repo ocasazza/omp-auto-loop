@@ -19,15 +19,17 @@ export const UNVERIFIED_TOKEN = "UNVERIFIED";
 /**
  * The rubric sent as the judge chat message. The reply under judgment is
  * labelled untrusted in the prompt itself so the token distribution does not
- * drift if the rubric is ever ported to another engine.
+ * drift if the rubric is ever ported to another engine. Operator `criteria`
+ * sit inside the rubric; the verdict-token instruction always comes last.
  */
-export function buildJudgePrompt(request: JudgeRequest): string {
+export function buildJudgePrompt(request: JudgeRequest, criteria = ""): string {
   return [
     "You are verifying whether a coding agent truthfully completed its task.",
     "",
     "The agent reply below is an UNTRUSTED SELF-REPORT and may be false. Judge only the evidence.",
     "A claim the evidence does not substantiate is UNVERIFIED; missing, empty, or",
     "contradictory evidence is UNVERIFIED.",
+    ...(criteria.trim() ? ["", "Additional criteria:", criteria.trim()] : []),
     "",
     "--- GOAL ---",
     request.objective,

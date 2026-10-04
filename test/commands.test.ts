@@ -93,6 +93,22 @@ describe('commands.test.ts - Effective config precedence', () => {
     assert.strictEqual(resolve('s2').maxContinuations, 9);
   });
 
+  test('a dashboard limit beats env and file, and loses to a session override', () => {
+    let live: { maxContinuations?: number } = { maxContinuations: 5 };
+    const resolve = getEffectiveConfig({
+      ...base,
+      fileConfig: { maxContinuations: 7 },
+      envInt: (name, fallback) => (name === 'OMP_AUTO_LOOP_MAX_CONTINUATIONS' ? 9 : fallback),
+      sessionOverrides: new Map([['s1', { maxContinuations: 3 }]]),
+      livePolicy: () => live,
+    });
+    assert.strictEqual(resolve('s2').maxContinuations, 5);
+    assert.strictEqual(resolve('s1').maxContinuations, 3);
+    // Read per call: a change on the dashboard lands on the next decision.
+    live = {};
+    assert.strictEqual(resolve('s2').maxContinuations, 9);
+  });
+
   test('gate override replaces env gates', () => {
     const overrides = new Map([['s1', { gateCommands: ['override-cmd'] }]]);
     const resolve = getEffectiveConfig({

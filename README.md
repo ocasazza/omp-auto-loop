@@ -77,6 +77,27 @@ as the launchd agent `local.omp-auto-loop-jump-cannon` (Darwin):
   publishes a new graph revision and re-lays out the canvas even for an
   unchanged file).
 
+### Dashboard: review, steering, taxonomy
+
+The first interactive omp session to start serves the loop's dashboard on
+`dashboardPort` (default 8798, loopback only). It reads three files in
+`~/.local/state/omp-auto-loop/`: `graph.lines` (live sessions),
+`events.jsonl` (the record), and `policy.jsonl` — an append-only log of
+every operator change, folded on read, which every session re-reads before
+each decision. Steering commands go to `control.jsonl`, addressed to a
+session by either of its labels (`repo#pid` from the log, `repo#<key>` from
+the graph).
+
+| Tab | What it changes |
+| --- | --- |
+| Review | Accept or overturn each `judged_complete` / `claimed_unverified` settle; an overturn sends the reason to the session and reopens its goal. Accept or reject proposals from the reflect pass, which reads recent settles and overturns and proposes one change to a prompt or limit; nothing changes until accepted, and one proposal waits at a time. |
+| Steer | Goal queue (add, reorder, dispatch to a session, optional pull-on-settle); guidance into a running session; live `maxContinuations` and cycle time limit (override env and config, lose to a per-session override); per repo, gate commands (each must exit 0 for `verified_complete`) and done criteria (prose the judge checks when a repo has no gates); the continuation directive and extra judge criteria. |
+| Taxonomy | Relabel terms in all four vocabularies, add event classes and settle reasons, file unclassified messages under a label class by prefix (never a branch class), hide classes from the feed, and define goal categories by keyword. |
+| Activity | Sessions and the decision feed. |
+
+The judge and the reflect pass share one model: `OMP_AUTO_LOOP_JUDGE_MODEL`
+at `OMP_AUTO_LOOP_JUDGE_BASE_URL`. Without it, neither runs.
+
 ### Imp bridge
 
 `extension/imp-bridge.ts` is a **standalone** extension (it shares nothing
@@ -95,7 +116,8 @@ The module emits `~/.config/omp-auto-loop/config.json`:
 ```json
 {
   "version": 1,
-  "dashboardPort": 8799,
+  "dashboardPort": 8798,
+  "graphApiPort": 8799,
   "impBridge": {
     "enable": false,
     "url": "http://127.0.0.1:4010",
@@ -109,6 +131,7 @@ Options under `local.omp.autoLoop`:
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `enable` | `true` | Load the extension. |
+| `dashboardPort` | `8798` | Loopback port for the loop's dashboard. Must differ from `jumpCannon.port`. |
 | `jumpCannon.enable` | `true` | Deploy the canvas launchd agent (Darwin). |
 | `jumpCannon.port` | `8799` | Loopback port for graph-api. |
 | `jumpCannon.lifecycle` | `"omp"` | `"omp"` or `"always"`. |
