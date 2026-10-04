@@ -1163,7 +1163,9 @@ export function createDashboard(options: {
       );
     }
 
-    if (path === "/api/policy") {
+    // GET reads the folded policy below; every other method is a write attempt
+    // and goes through the write gates, which refuse anything but a JSON POST.
+    if (path === "/api/policy" && req.method !== "GET") {
       return writeRoute(
         (record) => {
           // A prose line saved as a gate is a definition of done in the wrong

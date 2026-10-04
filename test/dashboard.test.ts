@@ -478,3 +478,12 @@ test("a hidden event class leaves the feed but not the log", () => {
   assert.match(html, /1 event hidden by taxonomy settings/);
   assert.match(html, /2<\/b> events/);
 });
+
+test("the folded policy is readable, and a read changes nothing", async () => {
+  await withPolicy([{ op: "criteria", repo: "brane", text: "pushed and green" }], async (base, ops) => {
+    const response = await fetch(`${base}/api/policy`);
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).criteria, { brane: "pushed and green" });
+    assert.equal(ops.length, 1);
+  });
+});
