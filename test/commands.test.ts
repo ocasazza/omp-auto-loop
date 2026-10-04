@@ -11,6 +11,7 @@ import {
 import {
   DEFAULT_SESSION_CONFIG,
   getEffectiveConfig,
+  parseFileConfig,
 } from '../extension/lib/config';
 import { registerCommands } from '../extension/lib/commands';
 import * as fsPromises from 'node:fs/promises';
@@ -93,6 +94,22 @@ describe('commands.test.ts - Effective config precedence', () => {
     assert.strictEqual(resolve('s2').maxContinuations, 9);
   });
 
+  test('a dashboard limit beats env and file, and loses to a session override', () => {
+    let live: { maxContinuations?: number } = { maxContinuations: 5 };
+    const resolve = getEffectiveConfig({
+      ...base,
+      fileConfig: { maxContinuations: 7 },
+      envInt: (name, fallback) => (name === 'OMP_AUTO_LOOP_MAX_CONTINUATIONS' ? 9 : fallback),
+      sessionOverrides: new Map([['s1', { maxContinuations: 3 }]]),
+      livePolicy: () => live,
+    });
+    assert.strictEqual(resolve('s2').maxContinuations, 5);
+    assert.strictEqual(resolve('s1').maxContinuations, 3);
+    // Read per call: a change on the dashboard lands on the next decision.
+    live = {};
+    assert.strictEqual(resolve('s2').maxContinuations, 9);
+  });
+
   test('gate override replaces env gates', () => {
     const overrides = new Map([['s1', { gateCommands: ['override-cmd'] }]]);
     const resolve = getEffectiveConfig({
@@ -101,6 +118,17 @@ describe('commands.test.ts - Effective config precedence', () => {
       sessionOverrides: overrides,
     });
     assert.deepStrictEqual(resolve('s1').gateCommands, ['override-cmd']);
+  });
+
+  test('config.json: v1 keys are read, a supervised dashboard is opt-in, other versions are ignored', () => {
+    assert.deepStrictEqual(parseFileConfig('{"version":1,"dashboardPort":8798,"graphApiPort":8799,"dashboardService":true}'), {
+      dashboardPort: 8798,
+      graphApiPort: 8799,
+      dashboardService: true,
+    });
+    assert.deepStrictEqual(parseFileConfig('{"version":1,"dashboardService":"yes"}'), {});
+    assert.deepStrictEqual(parseFileConfig('{"version":2,"dashboardPort":1}'), {});
+    assert.throws(() => parseFileConfig('not json'));
   });
 });
 

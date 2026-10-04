@@ -2,11 +2,11 @@ import {
   registerCommands,
 } from './extension/lib/commands';
 
+import { envInt, envStringArray } from './extension/lib/config';
+
 import {
   DEFAULT_SESSION_CONFIG,
   fileConfig,
-  envInt,
-  envStringArray,
   SESSION_OVERRIDES_KEY,
   XDG_CONFIG_HOME,
   XDG_STATE_HOME,

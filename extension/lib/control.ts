@@ -10,7 +10,11 @@
 // Pure: parsing and selection take text and return data. The caller owns the
 // filesystem, the clock and the effects.
 
-export type ControlAction = "pause" | "resume" | "disable" | "enable" | "goal";
+/**
+ * `guide` delivers operator text into the session's next turn; `reopen` puts a
+ * settled goal back to work after a human overturned its completion.
+ */
+export type ControlAction = "pause" | "resume" | "disable" | "enable" | "goal" | "guide" | "reopen";
 
 export interface ControlCommand {
   /** ms since the epoch, so ordering survives a clock that steps. */
@@ -18,13 +22,16 @@ export interface ControlCommand {
   /** Session label, or "*" for every session on this host. */
   readonly target: string;
   readonly action: ControlAction;
-  /** The objective for `goal`, ignored otherwise. */
+  /** The objective for `goal`, the text for `guide`, the reason for `reopen`. */
   readonly value?: string;
   /** How the command got here, for the audit line. */
   readonly by?: string;
 }
 
-const ACTIONS: readonly string[] = ["pause", "resume", "disable", "enable", "goal"];
+export const ACTIONS: readonly ControlAction[] = ["pause", "resume", "disable", "enable", "goal", "guide", "reopen"];
+
+/** Actions that are meaningless without text. */
+export const NEEDS_VALUE: readonly ControlAction[] = ["goal", "guide"];
 
 /** The broadcast target. A literal "*" cannot collide with a session label. */
 export const ALL_SESSIONS = "*";
@@ -54,7 +61,7 @@ export function parseCommand(line: string): ControlCommand | null {
   const record = raw as Record<string, unknown>;
   const { at, target, action, value, by } = record;
   if (typeof at !== "number" || typeof target !== "string") return null;
-  if (typeof action !== "string" || !ACTIONS.includes(action)) return null;
+  if (typeof action !== "string" || !(ACTIONS as readonly string[]).includes(action)) return null;
   if (value !== undefined && typeof value !== "string") return null;
 
   return {
@@ -78,13 +85,19 @@ export interface Selected {
 }
 
 /**
- * Commands addressed to `session` (or everyone) after `cursor`.
+ * Commands addressed to this session (or everyone) after `cursor`.
+ *
+ * A session answers to more than one name: the event log labels it
+ * `repo#pid`, the graph and the dashboard label it `repo#<session key>`.
+ * Matching only one of them makes steering from the other surface silently
+ * reach nobody.
  *
  * Filtering on `at > cursor` rather than on an index keeps the reader correct
  * when another session appends while this one is reading: a line count would
  * shift under it, a timestamp does not.
  */
-export function selectCommands(text: string, session: string, cursor: number): Selected {
+export function selectCommands(text: string, session: string | readonly string[], cursor: number): Selected {
+  const names: readonly string[] = typeof session === "string" ? [session] : session;
   const commands: ControlCommand[] = [];
   let highest = cursor;
 
@@ -93,9 +106,8 @@ export function selectCommands(text: string, session: string, cursor: number): S
     if (!command) continue;
     if (command.at > highest) highest = command.at;
     if (command.at <= cursor) continue;
-    if (command.target !== ALL_SESSIONS && command.target !== session) continue;
+    if (command.target !== ALL_SESSIONS && !names.includes(command.target)) continue;
     commands.push(command);
   }
-
   return { commands: commands.sort((a, b) => a.at - b.at), cursor: highest };
 }

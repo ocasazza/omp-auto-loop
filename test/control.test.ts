@@ -64,3 +64,13 @@ test("a cursor past everything selects nothing", () => {
   const text = encodeCommand({ at: 5, target: ALL_SESSIONS, action: "pause" });
   assert.deepEqual(selectCommands(text, "a#1", 5).commands, []);
 });
+
+test("a session answers to both its log label and its graph label", () => {
+  // The dashboard addresses `repo#<session key>`; the log knows `repo#pid`.
+  const text = encodeCommand({ at: 1, target: "repo#01a0d57a", action: "guide", value: "smaller diff" })
+    + encodeCommand({ at: 2, target: "repo#4242", action: "reopen", value: "no evidence" })
+    + encodeCommand({ at: 3, target: "repo#9999", action: "pause" });
+
+  const mine = selectCommands(text, ["repo#4242", "repo#01a0d57a"], 0);
+  assert.deepEqual(mine.commands.map((c) => c.action), ["guide", "reopen"]);
+});

@@ -1,11 +1,14 @@
-// Pure session-config resolution: per-session override > env > config.json
-// > default. Kept out of the extension entry so tests and the imp bridge can
-// import it without pulling @oh-my-pi/omptype (which only the entry needs,
-// and which resolves only inside omp's runtime).
+// Pure session-config resolution: per-session override > live policy (the
+// dashboard) > env > config.json > default. Kept out of the extension entry so
+// tests and the imp bridge can import it without pulling @oh-my-pi/omptype
+// (which only the entry needs, and which resolves only inside omp's runtime).
 
 export interface SessionConfig {
   version?: number;
+  /** The loop's own dashboard (lib/dashboard.ts). */
   dashboardPort: number;
+  /** The jump-cannon graph-api, which `doctor` health-checks. */
+  graphApiPort: number;
   maxContinuations: number;
   timeoutMs: number;
   heartbeatMs: number;
@@ -13,6 +16,8 @@ export interface SessionConfig {
   headless: boolean;
   disabled: boolean;
   paused: boolean;
+  /** A supervisor serves the dashboard (dashboard-server.ts); sessions leave the port alone. */
+  dashboardService: boolean;
 }
 
 const DEFAULT_MAX_CONTINUATIONS = 3;
@@ -23,6 +28,7 @@ export const DEFAULT_SESSION_CONFIG: SessionConfig = {
   // 8799 is the jump-cannon graph-api's port, so the loop dashboard cannot
   // claim it: both would be the default and the second to start would lose.
   dashboardPort: 8798, // Default if not in config.json or env
+  graphApiPort: 8799,
   maxContinuations: DEFAULT_MAX_CONTINUATIONS,
   timeoutMs: DEFAULT_TIMEOUT_MS,
   heartbeatMs: DEFAULT_HEARTBEAT_MS,
@@ -30,9 +36,41 @@ export const DEFAULT_SESSION_CONFIG: SessionConfig = {
   headless: false, // Will be overridden by pi.hasUI
   disabled: false, // Default to enabled
   paused: false, // Default to not paused
+  dashboardService: false,
 };
 
 export const SESSION_OVERRIDES_KEY = Symbol.for("omp-auto-loop.session-overrides");
+
+export function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+export function envStringArray(name: string): string[] {
+  const raw = process.env[name];
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((v): v is string => typeof v === "string" && v.length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The keys config.json (version 1) sets. Any other version contributes nothing. Throws on bad JSON. */
+export function parseFileConfig(text: string): Partial<SessionConfig> {
+  const parsed: unknown = JSON.parse(text);
+  if (typeof parsed !== "object" || parsed === null || !("version" in parsed) || parsed.version !== 1) return {};
+  const out: Partial<SessionConfig> = {};
+  if ("dashboardPort" in parsed && typeof parsed.dashboardPort === "number") out.dashboardPort = parsed.dashboardPort;
+  if ("graphApiPort" in parsed && typeof parsed.graphApiPort === "number") out.graphApiPort = parsed.graphApiPort;
+  if ("dashboardService" in parsed && parsed.dashboardService === true) out.dashboardService = true;
+  return out;
+}
 
 export interface LoopActions {
   newCycle(): void;
@@ -49,6 +87,7 @@ export function getEffectiveConfig({
   envInt,
   envStringArray,
   DEFAULT_SESSION_CONFIG,
+  livePolicy,
 }: {
   piHasUI: boolean;
   fileConfig: Partial<SessionConfig>;
@@ -56,6 +95,8 @@ export function getEffectiveConfig({
   envInt: (name: string, fallback: number) => number;
   envStringArray: (name: string) => string[];
   DEFAULT_SESSION_CONFIG: SessionConfig;
+  /** Limits set from the dashboard; read on every call so a change lands on the next decision. */
+  livePolicy?: () => Partial<Pick<SessionConfig, "maxContinuations" | "timeoutMs">>;
 }): (sessionId: string) => SessionConfig {
   return (sessionId: string): SessionConfig => {
     const overrides = sessionOverrides.get(sessionId) || {};
@@ -70,6 +111,7 @@ export function getEffectiveConfig({
       heartbeatMs: envInt("OMP_AUTO_LOOP_HEARTBEAT_MS", fileConfig.heartbeatMs ?? DEFAULT_SESSION_CONFIG.heartbeatMs),
       gateCommands: envStringArray("OMP_AUTO_LOOP_GATES").length > 0 ? envStringArray("OMP_AUTO_LOOP_GATES") : fileConfig.gateCommands ?? DEFAULT_SESSION_CONFIG.gateCommands,
       headless: !piHasUI,
+      ...(livePolicy?.() ?? {}),
       ...overrides,
     };
     return config;

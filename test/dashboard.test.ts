@@ -7,7 +7,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseProjection, renderDashboard, humanise, escapeHtml, taxonomyReport } from "../extension/lib/dashboard.ts";
+import { controlView, parseProjection, renderDashboard, humanise, escapeHtml, taxonomyReport } from "../extension/lib/dashboard.ts";
+import { encodeOp, foldPolicy, type PolicyOp } from "../extension/lib/policy.ts";
 
 const session = (over: Record<string, string> = {}) => {
   const tags = over.tags ?? "active-goal,main";
@@ -250,6 +251,8 @@ const withDashboard = async (
   options: {
     steer?: (c: { target: string; action: string; value?: string }) => void;
     readEvents?: () => string;
+    readPolicy?: () => string;
+    writePolicy?: (op: PolicyOp) => void;
   },
   run: (base: string) => Promise<void>,
 ) => {
@@ -378,5 +381,109 @@ test("the taxonomy route serves the declared vocabularies", async () => {
       body.decisionKinds.map((t: { id: string }) => t.id),
       ["continue", "settle", "verify", "no-op"],
     );
+  });
+});
+
+// --- control surface -------------------------------------------------------
+
+const postTo = (base: string, path: string, body: unknown) =>
+  fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+/** A dashboard over an in-memory policy log, so a write is visible to the next read. */
+const withPolicy = async (
+  initial: PolicyOp[],
+  run: (base: string, ops: PolicyOp[], steered: { target: string; action: string; value?: string }[]) => Promise<void>,
+) => {
+  const ops = [...initial];
+  const steered: { target: string; action: string; value?: string }[] = [];
+  await withDashboard(
+    {
+      readPolicy: () => ops.map((op, i) => encodeOp(op, i + 1, "t")).join(""),
+      writePolicy: (op) => ops.push(op),
+      steer: (c) => steered.push(c),
+    },
+    (base) => run(base, ops, steered),
+  );
+};
+
+test("a policy write is validated before it reaches the log", async () => {
+  await withPolicy([], async (base, ops) => {
+    assert.equal((await postTo(base, "/api/policy", { op: "param", key: "maxContinuations", value: 500 })).status, 400);
+    assert.equal((await postTo(base, "/api/policy", { op: "param", key: "maxContinuations", value: 5 })).status, 202);
+    assert.deepEqual(ops, [{ op: "param", key: "maxContinuations", value: 5 }]);
+  });
+});
+
+test("a policy write by GET or form post is refused", async () => {
+  await withPolicy([], async (base, ops) => {
+    assert.equal((await fetch(`${base}/api/policy?op=param`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "op=param" })).status, 415);
+    assert.equal((await fetch(`${base}/api/reflect`)).status, 405);
+    assert.deepEqual(ops, []);
+  });
+});
+
+test("overturning a done claim records it and sends the session back to work", async () => {
+  await withPolicy([], async (base, ops, steered) => {
+    const verdict = "repo#4242@2026-01-01T00:00:04Z";
+    const response = await postTo(base, "/api/policy", { op: "ratify", verdict, decision: "overturned", note: "no evidence" });
+    assert.equal(response.status, 202);
+    assert.equal(ops[0]?.op, "ratify");
+    assert.deepEqual(steered, [{ target: "repo#4242", action: "reopen", value: "no evidence" }]);
+  });
+});
+
+test("accepting a done claim does not steer anything", async () => {
+  await withPolicy([], async (base, _ops, steered) => {
+    await postTo(base, "/api/policy", { op: "ratify", verdict: "repo#1@2026-01-01T00:00:04Z", decision: "accepted" });
+    assert.deepEqual(steered, []);
+  });
+});
+
+test("dispatching a queued goal claims it and hands the objective to that session", async () => {
+  await withPolicy([{ op: "queue.add", id: "q1", objective: "audit citations", priority: 1 }], async (base, ops, steered) => {
+    assert.equal((await postTo(base, "/api/policy", { op: "queue.dispatch", id: "q1", target: "repo#01a0" })).status, 202);
+    assert.deepEqual(ops.at(-1), { op: "queue.claim", id: "q1", session: "repo#01a0" });
+    assert.deepEqual(steered, [{ target: "repo#01a0", action: "goal", value: "audit citations" }]);
+    // Claimed now, so a second dispatch has nothing to send.
+    assert.equal((await postTo(base, "/api/policy", { op: "queue.dispatch", id: "q1", target: "repo#02b0" })).status, 404);
+  });
+});
+
+test("a sentence saved as a gate moves to the repo's done criteria", async () => {
+  const line = "Push all changes to a PR and make sure all checks are passing.";
+  await withPolicy([{ op: "gates", repo: "brane", commands: ["bun test", line] }], async (base, ops) => {
+    assert.equal((await postTo(base, "/api/policy", { op: "gate.toCriteria", repo: "brane", line })).status, 202);
+    const policy = foldPolicy(ops.map((op, i) => encodeOp(op, i + 1, "t")).join(""));
+    assert.deepEqual(policy.gates.brane, ["bun test"]);
+    assert.equal(policy.criteria.brane, line);
+  });
+});
+
+test("a hidden event class leaves the feed but not the log", () => {
+  const events = [
+    event("2026-01-01T00:00:01Z", "other", "dashboard unavailable: port in use"),
+    event("2026-01-01T00:00:02Z", "goal", "goal set: real work"),
+  ].join("\n");
+  const state = parseProjection("", events);
+  const policy = foldPolicy(
+    [
+      encodeOp({ op: "term.add", vocab: "event", id: "noise", label: "Noise", description: "" }, 1, "t"),
+      encodeOp({ op: "rule", prefix: "dashboard unavailable:", cls: "noise" }, 2, "t"),
+      encodeOp({ op: "term", vocab: "event", id: "noise", hidden: true }, 3, "t"),
+    ].join(""),
+  );
+  const html = renderDashboard(state, controlView(state, policy, { maxContinuations: 3, timeoutMs: 1_800_000 }, false));
+  assert.doesNotMatch(html, /port in use/);
+  assert.match(html, /real work/);
+  assert.match(html, /1 event hidden by taxonomy settings/);
+  assert.match(html, /2<\/b> events/);
+});
+
+test("the folded policy is readable, and a read changes nothing", async () => {
+  await withPolicy([{ op: "criteria", repo: "brane", text: "pushed and green" }], async (base, ops) => {
+    const response = await fetch(`${base}/api/policy`);
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).criteria, { brane: "pushed and green" });
+    assert.equal(ops.length, 1);
   });
 });

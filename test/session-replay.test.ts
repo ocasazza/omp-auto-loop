@@ -8,12 +8,29 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
+import { encodeCommand } from "../extension/lib/control.ts";
+import { encodeOp } from "../extension/lib/policy.ts";
 
-import factory from "../extension/auto-loop.ts";
+// The factory writes the event log, the graph and binds the dashboard, and the
+// module reads config.json at import. Point both at a private dir first, or a
+// test run writes phantom sessions into the operator's live log and can take
+// a real port.
+const isolated = mkdtempSync(join(tmpdir(), "auto-loop-replay-"));
+mkdirSync(join(isolated, "config", "omp-auto-loop"), { recursive: true });
+writeFileSync(join(isolated, "config", "omp-auto-loop", "config.json"), '{"version":1,"dashboardPort":0}');
+process.env.XDG_CONFIG_HOME = join(isolated, "config");
+process.env.OMP_AUTO_LOOP_STATUS_FILE = join(isolated, "state", "events.jsonl");
+// No model: the judge and reflect pass stay off, so a test never makes a network call.
+delete process.env.OMP_AUTO_LOOP_JUDGE_MODEL;
+const stateDir = join(isolated, "state");
+mkdirSync(stateDir, { recursive: true });
 
-const HERE = dirname(fileURLToPath(import.meta.url));
+// Dynamic: config.json is read at module load, so the env above must be set first.
+const { default: factory } = await import("../extension/auto-loop.ts");
 
 type Entry = { type: string; customType?: string; data?: unknown };
 
@@ -81,4 +98,90 @@ test("session_start ignores custom entries of other types", async () => {
   // The unrelated entry's disabled:true must NOT flip loopState; only
   // auto_loop_config entries may.
   assert.deepEqual(notes, [], "foreign customType must not disable the loop");
+});
+
+// --- policy and steering reach the running session -------------------------
+
+type Tool = { execute: (id: string, params: { action: string; objective?: string }) => Promise<unknown> };
+
+function liveSession() {
+  const handlers: Record<string, (event?: unknown, ctx?: unknown) => unknown> = {};
+  const said: string[] = [];
+  const sent: string[] = [];
+  let tool: Tool | undefined;
+  let onSaid: ((m: string) => void) | undefined;
+  const pi = {
+    ...makePi(handlers),
+    sendUserMessage: (m: string) => {
+      said.push(m);
+      onSaid?.(m);
+    },
+    sendMessage: (m: string) => sent.push(m),
+    registerTool: (t: Tool) => {
+      tool = t;
+    },
+  };
+  factory(pi);
+  /** Resolves with the first agent message matching `pattern`. */
+  const heard = (pattern: RegExp): Promise<string> => {
+    const { promise, resolve } = Promise.withResolvers<string>();
+    onSaid = (m) => {
+      if (pattern.test(m)) resolve(m);
+    };
+    return promise;
+  };
+  return { handlers, said, sent, heard, goal: () => tool! };
+}
+
+const policy = (...ops: Parameters<typeof encodeOp>[0][]) =>
+  appendFileSync(join(stateDir, "policy.jsonl"), ops.map((op) => encodeOp(op, Date.now(), "test")).join(""));
+
+test("guidance addressed to the dashboard's label for a session reaches its agent", async () => {
+  const { heard } = liveSession();
+  // With no session id yet the key falls back to `p<pid>`; the graph label the
+  // dashboard sends to is `<cwd basename>#<first 8 of the key>`.
+  const graphLabel = `${basename(process.cwd())}#${`p${process.pid}`.slice(0, 8)}`;
+  const guidance = heard(/^\[operator guidance\]/);
+  appendFileSync(
+    join(stateDir, "control.jsonl"),
+    encodeCommand({ at: Date.now() + 1, target: graphLabel, action: "guide", value: "run the gate first" }),
+  );
+  // Real time: the extension polls the control file every 2s by design, and
+  // the test awaits the delivery itself rather than a guessed delay.
+  assert.equal(await guidance, "[operator guidance] run the gate first");
+});
+
+test("a continuation sends the directive as edited on the dashboard", async () => {
+  policy({ op: "prompt", key: "continuation", text: "Keep going; prove each claim with command output." });
+  const { handlers, sent, goal } = liveSession();
+  await goal().execute("t1", { action: "set", objective: "fix the thing" });
+  await handlers.session_stop({ messages: [{ role: "assistant", content: "still working" }] }, { hasUI: true, cwd: isolated });
+  assert.deepEqual(sent, ["Keep going; prove each claim with command output."]);
+});
+
+const hasGit = (() => {
+  try {
+    execSync("git --version", { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+test("gates set on the dashboard make verified_complete reachable", { skip: !hasGit && "needs git for worktree attestation" }, async () => {
+  const repo = mkdtempSync(join(tmpdir(), "gated-repo-"));
+  execSync("git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init", { cwd: repo });
+  policy({ op: "gates", repo: basename(repo), commands: ["true"] });
+
+  const { handlers, goal } = liveSession();
+  await goal().execute("t1", { action: "set", objective: "ship it" });
+  await goal().execute("t2", { action: "complete" });
+  await handlers.session_stop({ messages: [{ role: "assistant", content: "done" }] }, { hasUI: true, cwd: repo });
+
+  // The sink appends asynchronously and exposes no promise, so the outcome is
+  // observed where an operator would see it: the event log.
+  const log = join(stateDir, "events.jsonl");
+  const settled = () => existsSync(log) && readFileSync(log, "utf8").includes("settled: verified_complete");
+  for (let i = 0; i < 100 && !settled(); i++) await Bun.sleep(20);
+  assert.ok(settled(), readFileSync(log, "utf8"));
 });

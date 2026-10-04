@@ -53,6 +53,37 @@ in {
       '';
     };
 
+    dashboardPort = lib.mkOption {
+      type = lib.types.port;
+      default = 8798;
+      description = ''
+        Loopback port for the loop's own dashboard (review, steering,
+        taxonomy). Served by the first omp session to start, or by
+        dashboard-server.ts when dashboardService is set. Must differ from
+        jumpCannon.port.
+      '';
+    };
+
+    dashboardService = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        A supervisor runs `bun run ''${extensionDir}/dashboard-server.ts`
+        and owns dashboardPort; omp sessions then leave the port alone.
+        Set by the consumer that declares the supervised process.
+      '';
+    };
+
+    extensionDir = lib.mkOption {
+      type = lib.types.str;
+      readOnly = true;
+      default = "${./../extension}";
+      description = ''
+        Store path of the extension directory, for a consumer that runs
+        dashboard-server.ts under its own supervisor.
+      '';
+    };
+
     jumpCannon = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -148,13 +179,16 @@ in {
         canvasEnabled && cfg.jumpCannon.lifecycle == "omp"
       ) {text = canvasLabel;};
 
-      # Shared runtime config: commands.ts reads dashboardPort to manage the
-      # canvas agent; imp-bridge.ts reads the impBridge block (enable must
-      # be exactly true). Emitted whenever the extension is on — including
-      # lifecycle == "always", where no canvas-agent file exists.
+      # Shared runtime config: the extension binds dashboardPort; `doctor`
+      # health-checks the graph-api on graphApiPort; imp-bridge.ts reads the
+      # impBridge block (enable must be exactly true). Emitted whenever the
+      # extension is on — including lifecycle == "always", where no
+      # canvas-agent file exists.
       "omp-auto-loop/config.json".text = builtins.toJSON {
         version = 1;
-        dashboardPort = cfg.jumpCannon.port;
+        dashboardPort = cfg.dashboardPort;
+        dashboardService = cfg.dashboardService;
+        graphApiPort = cfg.jumpCannon.port;
         impBridge = {
           enable = cfg.impBridge.enable;
           url = cfg.impBridge.url;
