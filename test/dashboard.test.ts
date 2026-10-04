@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseProjection, renderDashboard, humanise, escapeHtml } from "../extension/lib/dashboard.ts";
+import { parseProjection, renderDashboard, humanise, escapeHtml, taxonomyReport } from "../extension/lib/dashboard.ts";
 
 const session = (over: Record<string, string> = {}) => {
   const tags = over.tags ?? "active-goal,main";
@@ -247,7 +247,10 @@ test("no settles means no rate rather than a zero", () => {
 // --- steering ------------------------------------------------------------
 
 const withDashboard = async (
-  options: { steer?: (c: { target: string; action: string; value?: string }) => void },
+  options: {
+    steer?: (c: { target: string; action: string; value?: string }) => void;
+    readEvents?: () => string;
+  },
   run: (base: string) => Promise<void>,
 ) => {
   const http = await import("node:http");
@@ -331,5 +334,49 @@ test("an unspecified target steers every session", async () => {
 test("with no steer sink the route refuses rather than pretending", async () => {
   await withDashboard({}, async (base) => {
     assert.equal((await post(base, { action: "pause" })).status, 403);
+  });
+});
+
+// Taxonomy management, read half: what the loop says it classifies by, against
+// what the log shows it has actually produced.
+
+test("taxonomy counts classes, and a recorded kind wins over the message", () => {
+  const report = taxonomyReport(
+    [
+      event("2026-01-01T00:00:00Z", "continue", "autonomous continuation 1/3"),
+      // The recorded class disagrees with the message; the record is authoritative.
+      event("2026-01-01T00:01:00Z", "heartbeat", "goal set: x"),
+      // A log predating the field: classified from the message.
+      JSON.stringify({ ts: "2026-01-01T00:02:00Z", session: "jaeger#1", msg: "settled: cycle_timeout" }),
+    ].join("\n"),
+  );
+  const counts = new Map(report.eventClasses.map((term) => [term.id, term.count]));
+
+  assert.equal(counts.get("continue"), 1);
+  assert.equal(counts.get("heartbeat"), 1);
+  assert.equal(counts.get("settled"), 1);
+  assert.equal(counts.get("goal"), 0);
+});
+
+test("a settle reason the union does not name is reported, never dropped", () => {
+  const report = taxonomyReport(event("2026-01-01T00:00:00Z", "settled", "settled: turn ended error"));
+
+  assert.deepEqual(report.settleUnmatched, [{ reason: "turn ended error", count: 1 }]);
+  assert.equal(report.settleReasons.find((term) => term.id === "cycle_timeout")?.count, 0);
+});
+
+test("the taxonomy route serves the declared vocabularies", async () => {
+  const events = event("2026-01-01T00:00:00Z", "settled", "settled: judged_complete");
+  await withDashboard({ readEvents: () => events }, async (base) => {
+    const response = await fetch(`${base}/api/taxonomy`);
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.settleReasons.find((t: { id: string }) => t.id === "judged_complete").count, 1);
+    assert.equal(body.eventClasses.find((t: { id: string }) => t.id === "settled").count, 1);
+    assert.deepEqual(
+      body.decisionKinds.map((t: { id: string }) => t.id),
+      ["continue", "settle", "verify", "no-op"],
+    );
   });
 });

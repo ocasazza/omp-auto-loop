@@ -12,6 +12,18 @@
 // tested without a socket or a filesystem.
 
 import { ALL_SESSIONS } from "./control.ts";
+import {
+  classify,
+  DECISION_KINDS,
+  EDGE_KINDS,
+  EVENT_CLASSES,
+  SETTLE_REASONS,
+  type DecisionKind,
+  type EdgeKind,
+  type EventClass,
+  type SettleReason,
+  type Term,
+} from "./taxonomy.ts";
 
 export interface SessionRow {
   readonly id: string;
@@ -40,7 +52,25 @@ export interface SessionRow {
  * happened.
  */
 export function parseEvents(text: string): DecisionRow[] {
-  const rows: DecisionRow[] = [];
+  return readEvents(text).map((event) => ({
+    ts: event.ts,
+    session: event.session,
+    kind: event.kind ?? "other",
+    message: event.msg,
+  }));
+}
+
+interface RawEvent {
+  readonly ts: string;
+  readonly session: string;
+  /** Absent in logs written before the field existed. */
+  readonly kind: string | undefined;
+  readonly msg: string;
+}
+
+/** The one parse of the event log; decisions and taxonomy counts both read it. */
+function readEvents(text: string): RawEvent[] {
+  const rows: RawEvent[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     let raw: unknown;
@@ -56,8 +86,8 @@ export function parseEvents(text: string): DecisionRow[] {
     rows.push({
       ts,
       session: typeof session === "string" ? session : "",
-      kind: typeof kind === "string" ? kind : "other",
-      message: msg,
+      kind: typeof kind === "string" ? kind : undefined,
+      msg,
     });
   }
   return rows;
@@ -68,6 +98,53 @@ export interface DecisionRow {
   readonly session: string;
   readonly kind: string;
   readonly message: string;
+}
+
+export interface TaxonomyReport {
+  readonly eventClasses: readonly (Term<EventClass> & { readonly count: number })[];
+  readonly settleReasons: readonly (Term<SettleReason> & { readonly count: number })[];
+  readonly decisionKinds: readonly Term<DecisionKind>[];
+  readonly edgeKinds: readonly Term<EdgeKind>[];
+  /**
+   * Settle messages whose reason matches no declared term. The loop writes the
+   * reason into the message and nothing validates it against the union, so this
+   * is where that drift is reported instead of being silently dropped.
+   */
+  readonly settleUnmatched: readonly { readonly reason: string; readonly count: number }[];
+}
+
+/**
+ * The declared vocabularies with live counts. A term at zero is a reason the
+ * loop has never produced; an entry in `settleUnmatched` is one it produced
+ * that the union does not name. Both are worth seeing, and neither is derivable
+ * from the union alone.
+ */
+export function taxonomyReport(text: string): TaxonomyReport {
+  const classCounts = new Map<string, number>();
+  const reasonCounts = new Map<string, number>();
+  const declared = new Set<string>(SETTLE_REASONS.map((term) => term.id));
+
+  for (const event of readEvents(text)) {
+    // A recorded class is authoritative; only pre-field logs classify by message.
+    const cls = event.kind ?? classify(event.msg);
+    classCounts.set(cls, (classCounts.get(cls) ?? 0) + 1);
+    if (cls !== "settled" || !event.msg.startsWith("settled: ")) continue;
+    const reason = event.msg.slice("settled: ".length).trim();
+    reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
+  }
+
+  const settleUnmatched = [...reasonCounts]
+    .filter(([reason]) => !declared.has(reason))
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count);
+
+  return {
+    eventClasses: EVENT_CLASSES.map((term) => ({ ...term, count: classCounts.get(term.id) ?? 0 })),
+    settleReasons: SETTLE_REASONS.map((term) => ({ ...term, count: reasonCounts.get(term.id) ?? 0 })),
+    decisionKinds: DECISION_KINDS,
+    edgeKinds: EDGE_KINDS,
+    settleUnmatched,
+  };
 }
 
 export interface DashboardState {
@@ -564,6 +641,11 @@ export function createDashboard(options: {
       const state = parseProjection(projection, events);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(state));
+      return;
+    }
+    if (path === "/api/taxonomy") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(taxonomyReport(events)));
       return;
     }
     if (path !== "/") {

@@ -20,29 +20,12 @@
 //     bounded and variable. Hence every path terminates explicitly and
 //     records whether the outcome was verified or merely claimed.
 //
-// No imports. Everything here is pure: ports are injected by the caller.
+// No runtime imports (the taxonomy import is type-only and erases). Everything
+// here is pure: ports are injected by the caller.
 
-export type DecisionKind =
-  | "continue"
-  | "settle"
-  | "verify"
-  | "no-op";
+import type { DecisionKind, SettleReason } from "./taxonomy.ts";
 
-export type SettleReason =
-  | "headless"
-  | "scheduled_continuation"
-  | "error"
-  | "aborted"
-  | "verified_complete"
-  | "claimed_unverified"
-  | "judged_complete"
-  | "judge_unavailable"
-  | "continuation_limit"
-  | "cycle_timeout"
-  | "gate_retries_exhausted"
-  | "gate_deadline"
-  | "gate_unavailable"
-  | "stale_result";
+export type { DecisionKind, SettleReason };
 
 export interface Decision {
   readonly kind: DecisionKind;

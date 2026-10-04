@@ -5,12 +5,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   atom,
-  classify,
   createGraphProjection,
   idPart,
   ids,
   type SessionState,
 } from "../extension/lib/observation.ts";
+import { classify } from "../extension/lib/taxonomy.ts";
 
 const REPO = { root: "/src/envoy-ai-gateway", name: "envoy-ai-gateway" };
 
@@ -61,6 +61,12 @@ test("classify maps messages to the event classes", () => {
   assert.equal(classify("settled: model reported AUTOLOOP:DONE"), "settled");
   assert.equal(classify("heartbeat: nudging idle session toward active goal"), "heartbeat");
   assert.equal(classify("whatever"), "other");
+  // A settle whose reason names a gate is still a settle. Matching
+  // includes("gate") first types it as a gate event, and replay resets the
+  // budget on "settled" -- so that reset would be missed entirely.
+  assert.equal(classify("settled: gate_retries_exhausted"), "settled");
+  // A goal that merely mentions a gate is a goal, not a gate event.
+  assert.equal(classify("goal set: add a gate to the release flow"), "goal");
 });
 
 test("a goal whose text merely mentions a gate is still a goal event", () => {
