@@ -38,8 +38,8 @@ import * as path from 'path';
 import * as os from 'os';
 import { readFileSync } from 'fs';
 import { registerCommands } from './lib/commands'; // NEW import for commands
-import { createDashboard, parseEvents, verdictMix } from './lib/dashboard.ts';
-import { encodeCommand, selectCommands, type ControlCommand, type ControlAction } from './lib/control.ts';
+import { hostDashboard, parseEvents, verdictMix } from './lib/dashboard.ts';
+import { selectCommands, type ControlCommand } from './lib/control.ts';
 import type { ExtensionCommandContext, AutocompleteItem } from '@oh-my-pi/pi-coding-agent';
 
 import { type } from "@oh-my-pi/omptype";
@@ -110,39 +110,14 @@ export const AUTO_LOOP_CONFIG_FILE = path.join(AUTO_LOOP_CONFIG_DIR, 'config.jso
 
 export let fileConfig: Partial<SessionConfig> = {};
 try {
-  const configContent = readFileSync(AUTO_LOOP_CONFIG_FILE, 'utf8');
-  const parsedConfig = JSON.parse(configContent);
-  if (parsedConfig.version === 1) {
-    fileConfig.dashboardPort = parsedConfig.dashboardPort;
-    if (typeof parsedConfig.graphApiPort === "number") fileConfig.graphApiPort = parsedConfig.graphApiPort;
-  }
-} catch (e: any) {
-  console.error(`[auto-loop] Failed to read or parse config.json at ${AUTO_LOOP_CONFIG_FILE}: ${e.message}`);
+  fileConfig = parseFileConfig(readFileSync(AUTO_LOOP_CONFIG_FILE, 'utf8'));
+} catch (e: unknown) {
+  console.error(`[auto-loop] Failed to read or parse config.json at ${AUTO_LOOP_CONFIG_FILE}: ${e instanceof Error ? e.message : String(e)}`);
 }
 
 // Gate defaults (the loop's own; session-config defaults live in ./lib/config).
 export const DEFAULT_GATE_RETRIES = 3;
 export const DEFAULT_GATE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-
-export function envInt(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
-
-export function envStringArray(name: string): string[] {
-  const raw = process.env[name];
-  if (!raw) return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? parsed.filter((v): v is string => typeof v === "string" && v.length > 0)
-      : [];
-  } catch {
-    return [];
-  }
-}
 
 export function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -261,7 +236,14 @@ export {
   getEffectiveConfig,
 } from "./lib/config.ts";
 
-import { SESSION_OVERRIDES_KEY, DEFAULT_SESSION_CONFIG, getEffectiveConfig } from "./lib/config.ts";
+import {
+  SESSION_OVERRIDES_KEY,
+  DEFAULT_SESSION_CONFIG,
+  envInt,
+  envStringArray,
+  getEffectiveConfig,
+  parseFileConfig,
+} from "./lib/config.ts";
 
 type GoalAction = "set" | "pause" | "resume" | "complete" | "status";
 
@@ -772,39 +754,29 @@ export default function (pi: {
     if (flag(policy, "reflect")) void proposeNow(sessionLabel);
   };
 
+  // A supervised dashboard-server.ts owns the port when dashboardService is
+  // set; otherwise the first session to start serves it.
   let dashboard: { close: () => void; url: string } | undefined;
-  if (getEffective().dashboardPort > 0) {
+  if (getEffective().dashboardPort > 0 && !getEffective().dashboardService) {
     try {
-      dashboard = createDashboard({
+      dashboard = hostDashboard({
         port: getEffective().dashboardPort,
-        readProjection: () => readText(`${stateDir}/graph.lines`),
-        // The log is the record; the projection can be missing a settle.
-        readEvents: () => readText(statusFile),
-        readPolicy: () => readText(policyFile),
-        writePolicy: (op) => appendPolicy(op, "dashboard"),
+        statusFile,
+        files: {
+          read: readText,
+          append: (file, text) => {
+            mkdirSync(dirname(file), { recursive: true });
+            appendFileSync(file, text);
+          },
+        },
+        chat,
         limits: () => ({ maxContinuations: getEffective().maxContinuations, timeoutMs: getEffective().timeoutMs }),
-        reflect: () => proposeNow("dashboard"),
         // Another session already serving the port is the normal case on a
         // host running more than one session; only a real failure is news.
         onError: (message) => {
           if (!/in use|EADDRINUSE/i.test(message)) note(`dashboard unavailable: ${message}`);
         },
         onListening: (url) => note(`dashboard: ${url}`),
-        steer: (command) => {
-          // Append, never rewrite: every session reads this file and appends
-          // to it, so a read-modify-write would drop whichever steering landed
-          // in the window. O_APPEND makes one line one write.
-          appendFileSync(
-            controlFile,
-            encodeCommand({
-              at: Date.now(),
-              target: command.target,
-              action: command.action as ControlAction,
-              value: command.value,
-              by: "dashboard",
-            }),
-          );
-        },
       });
     } catch (error) {
       note(`dashboard unavailable: ${error instanceof Error ? error.message : String(error)}`);

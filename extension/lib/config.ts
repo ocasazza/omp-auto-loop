@@ -16,6 +16,8 @@ export interface SessionConfig {
   headless: boolean;
   disabled: boolean;
   paused: boolean;
+  /** A supervisor serves the dashboard (dashboard-server.ts); sessions leave the port alone. */
+  dashboardService: boolean;
 }
 
 const DEFAULT_MAX_CONTINUATIONS = 3;
@@ -34,9 +36,41 @@ export const DEFAULT_SESSION_CONFIG: SessionConfig = {
   headless: false, // Will be overridden by pi.hasUI
   disabled: false, // Default to enabled
   paused: false, // Default to not paused
+  dashboardService: false,
 };
 
 export const SESSION_OVERRIDES_KEY = Symbol.for("omp-auto-loop.session-overrides");
+
+export function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+export function envStringArray(name: string): string[] {
+  const raw = process.env[name];
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((v): v is string => typeof v === "string" && v.length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The keys config.json (version 1) sets. Any other version contributes nothing. Throws on bad JSON. */
+export function parseFileConfig(text: string): Partial<SessionConfig> {
+  const parsed: unknown = JSON.parse(text);
+  if (typeof parsed !== "object" || parsed === null || !("version" in parsed) || parsed.version !== 1) return {};
+  const out: Partial<SessionConfig> = {};
+  if ("dashboardPort" in parsed && typeof parsed.dashboardPort === "number") out.dashboardPort = parsed.dashboardPort;
+  if ("graphApiPort" in parsed && typeof parsed.graphApiPort === "number") out.graphApiPort = parsed.graphApiPort;
+  if ("dashboardService" in parsed && parsed.dashboardService === true) out.dashboardService = true;
+  return out;
+}
 
 export interface LoopActions {
   newCycle(): void;

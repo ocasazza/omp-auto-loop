@@ -58,8 +58,29 @@ in {
       default = 8798;
       description = ''
         Loopback port for the loop's own dashboard (review, steering,
-        taxonomy). The first omp session to start serves it. Must differ
-        from jumpCannon.port.
+        taxonomy). Served by the first omp session to start, or by
+        dashboard-server.ts when dashboardService is set. Must differ from
+        jumpCannon.port.
+      '';
+    };
+
+    dashboardService = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        A supervisor runs `bun run ''${extensionDir}/dashboard-server.ts`
+        and owns dashboardPort; omp sessions then leave the port alone.
+        Set by the consumer that declares the supervised process.
+      '';
+    };
+
+    extensionDir = lib.mkOption {
+      type = lib.types.str;
+      readOnly = true;
+      default = "${./../extension}";
+      description = ''
+        Store path of the extension directory, for a consumer that runs
+        dashboard-server.ts under its own supervisor.
       '';
     };
 
@@ -166,6 +187,7 @@ in {
       "omp-auto-loop/config.json".text = builtins.toJSON {
         version = 1;
         dashboardPort = cfg.dashboardPort;
+        dashboardService = cfg.dashboardService;
         graphApiPort = cfg.jumpCannon.port;
         impBridge = {
           enable = cfg.impBridge.enable;

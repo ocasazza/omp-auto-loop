@@ -11,6 +11,7 @@ import {
 import {
   DEFAULT_SESSION_CONFIG,
   getEffectiveConfig,
+  parseFileConfig,
 } from '../extension/lib/config';
 import { registerCommands } from '../extension/lib/commands';
 import * as fsPromises from 'node:fs/promises';
@@ -117,6 +118,17 @@ describe('commands.test.ts - Effective config precedence', () => {
       sessionOverrides: overrides,
     });
     assert.deepStrictEqual(resolve('s1').gateCommands, ['override-cmd']);
+  });
+
+  test('config.json: v1 keys are read, a supervised dashboard is opt-in, other versions are ignored', () => {
+    assert.deepStrictEqual(parseFileConfig('{"version":1,"dashboardPort":8798,"graphApiPort":8799,"dashboardService":true}'), {
+      dashboardPort: 8798,
+      graphApiPort: 8799,
+      dashboardService: true,
+    });
+    assert.deepStrictEqual(parseFileConfig('{"version":1,"dashboardService":"yes"}'), {});
+    assert.deepStrictEqual(parseFileConfig('{"version":2,"dashboardPort":1}'), {});
+    assert.throws(() => parseFileConfig('not json'));
   });
 });
 

@@ -16,9 +16,11 @@
 // from serving, so they test without a socket or a filesystem.
 
 import type * as Http from "node:http";
-import { ACTIONS, ALL_SESSIONS, NEEDS_VALUE } from "./control.ts";
+import { ACTIONS, ALL_SESSIONS, NEEDS_VALUE, encodeCommand, type ControlAction } from "./control.ts";
+import type { ChatPort } from "./model.ts";
 import {
   EMPTY_POLICY,
+  encodeOp,
   EXTENSIBLE,
   PARAMS,
   PROMPTS,
@@ -38,6 +40,7 @@ import {
   type Verdict,
   type Vocabulary,
 } from "./policy.ts";
+import { proposeImprovement } from "./reflect.ts";
 import {
   classify,
   DECISION_KINDS,
@@ -1261,4 +1264,71 @@ export function createDashboard(options: {
     },
     url,
   };
+}
+
+/** Reads and appends files; each host binds it to node:fs. */
+export interface DashboardFiles {
+  /** File text, or "" when the file does not exist. */
+  read(path: string): string;
+  /** Append, creating the file and its directory as needed. */
+  append(path: string, text: string): void;
+}
+
+/**
+ * The dashboard over the loop's state files, wired the one way both hosts
+ * use: an omp session (auto-loop.ts) and the supervised dashboard-server.ts.
+ */
+export function hostDashboard(options: {
+  port: number;
+  /** events.jsonl; policy.jsonl, control.jsonl and graph.lines sit beside it. */
+  statusFile: string;
+  files: DashboardFiles;
+  /** The judge model, which the reflect pass also uses. Absent means no proposals. */
+  chat?: ChatPort;
+  limits: () => { maxContinuations: number; timeoutMs: number };
+  onError?: (message: string) => void;
+  onListening?: (url: string) => void;
+}): { close: () => void; url: string } {
+  const { files, statusFile, chat } = options;
+  const stateDir = statusFile.slice(0, statusFile.lastIndexOf("/"));
+  const policyFile = `${stateDir}/policy.jsonl`;
+  const writePolicy = (op: PolicyOp) => files.append(policyFile, encodeOp(op, Date.now(), "dashboard"));
+  return createDashboard({
+    port: options.port,
+    readProjection: () => files.read(`${stateDir}/graph.lines`),
+    readEvents: () => files.read(statusFile),
+    readPolicy: () => files.read(policyFile),
+    writePolicy,
+    limits: options.limits,
+    reflect: chat
+      ? () => {
+          const rows = parseEvents(files.read(statusFile));
+          return proposeImprovement({
+            chat,
+            policy: foldPolicy(files.read(policyFile)),
+            events: rows.map((d) => ({ ts: d.ts, session: d.session, msg: d.message })),
+            limits: options.limits(),
+            mix: verdictMix(rows, Date.now(), 24),
+            append: writePolicy,
+            source: "dashboard",
+            nowMs: Date.now(),
+          });
+        }
+      : undefined,
+    // Append, never rewrite: every session reads this file and appends to it,
+    // so a read-modify-write would drop whichever steering landed in the window.
+    steer: (command) =>
+      files.append(
+        `${stateDir}/control.jsonl`,
+        encodeCommand({
+          at: Date.now(),
+          target: command.target,
+          action: command.action as ControlAction,
+          value: command.value,
+          by: "dashboard",
+        }),
+      ),
+    onError: options.onError,
+    onListening: options.onListening,
+  });
 }
