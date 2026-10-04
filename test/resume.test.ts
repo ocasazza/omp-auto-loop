@@ -84,3 +84,18 @@ test("replay never exceeds the continuations present in the log", () => {
   assert.ok(r.continuations <= rows.length);
   assert.equal(r.continuations, 37);
 });
+
+// Pre-`kind` logs carry no event class, so replay classifies by message -- and
+// must classify exactly as the graph projection does. The two copies had
+// diverged: resume.ts matched includes("gate") before startsWith("settled"),
+// so a settle whose reason named a gate read as a gate event and the budget
+// was never reset.
+test("a settle with no recorded kind resets the budget, gate in the reason included", () => {
+  const r = replayCycle([
+    { ts: "2026-01-01T00:00:00.000Z", session: "repo#1", msg: "autonomous continuation 1/3" },
+    { ts: "2026-01-01T00:01:00.000Z", session: "repo#1", msg: "autonomous continuation 2/3" },
+    { ts: "2026-01-01T00:02:00.000Z", session: "repo#1", msg: "settled: gate_retries_exhausted" },
+  ]);
+  assert.equal(r.continuations, 0);
+  assert.equal(r.cycleStartedAtMs, Date.parse("2026-01-01T00:02:00.000Z"));
+});

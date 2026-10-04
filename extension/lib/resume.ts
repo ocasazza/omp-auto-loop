@@ -5,7 +5,7 @@
 // already durable, so the cheapest correct "lease" is to replay it: a run
 // adopts the budget its predecessor had spent, and a settled cycle is gone.
 
-import type { EventClass } from "./observation.ts";
+import { classify, type EventClass } from "./taxonomy.ts";
 
 export interface LoopEvent {
   readonly ts: string;
@@ -27,15 +27,11 @@ export interface ReplayOptions {
   readonly nowMs?: number;
 }
 
+// A recorded kind is authoritative; only logs that predate the field are
+// classified from the message, and they use the same classifier the graph
+// projection uses -- a second copy here had already diverged.
 function classOf(event: LoopEvent): EventClass {
-  if (event.kind) return event.kind;
-  const msg = event.msg ?? "";
-  if (msg.startsWith("autonomous continuation")) return "continue";
-  if (msg.includes("gate")) return "gate";
-  if (msg.startsWith("goal")) return "goal";
-  if (msg.startsWith("heartbeat")) return "heartbeat";
-  if (msg.startsWith("settled")) return "settled";
-  return "other";
+  return event.kind ?? classify(event.msg ?? "");
 }
 
 /**

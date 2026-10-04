@@ -15,29 +15,9 @@
 
 import type { FsPort } from "./ports.ts";
 
-export type EventClass =
-  | "continue"
-  | "gate"
-  | "goal"
-  | "heartbeat"
-  | "settled"
-  | "other";
-
-export function classify(msg: string): EventClass {
-  if (msg.startsWith("autonomous continuation")) return "continue";
-  // Anchor on the two gate messages the loop actually emits (see the note()
-  // call sites in auto-loop.ts: "gate failed ... -- continuing" and "gates
-  // passed -- settling"). A bare includes("gate") also matched any goal whose
-  // objective merely mentioned a gate, so real goal events were typed as gate
-  // events -- which silently corrupts anything keyed on the event class.
-  if (msg.startsWith("gate failed") || msg.startsWith("gates passed")) {
-    return "gate";
-  }
-  if (msg.startsWith("goal")) return "goal";
-  if (msg.startsWith("heartbeat")) return "heartbeat";
-  if (msg.startsWith("settled")) return "settled";
-  return "other";
-}
+// The event vocabulary and its classifier live in taxonomy.ts, so the graph
+// projection and the budget replay cannot classify the same message differently.
+import { classify, type EdgeKind } from "./taxonomy.ts";
 
 /** Grammar-safe atom: the pest field/atom rules exclude , ; = | and newline. */
 export function atom(text: string, max = 80): string {
@@ -136,8 +116,6 @@ function representable(line: string): boolean {
   const [, id, title, kind] = line.split("|");
   return Boolean(id && title && kind);
 }
-/** Edge kinds, declared as `[[schema.edge_types]]` in the omp-auto-loop package. */
-export type EdgeKind = "in_repo" | "pursues" | "runs_gate" | "spawned" | "emitted" | "next";
 
 /** The kind an edge between these node kinds carries (see apply()). */
 export function inferEdgeKind(source: string | undefined, target: string | undefined): EdgeKind | null {
