@@ -217,7 +217,7 @@ async function worktreeSnapshot(
 const DONE_MARKER = "AUTOLOOP:DONE";
 
 export interface GoalState {
-  status: "idle" | "active" | "paused" | "complete";
+  status: "idle" | "active" | "claimed" | "paused" | "complete";
   objective: string;
   goalId?: string;
   continuationsUsed: number;
@@ -862,10 +862,16 @@ export default function (pi: {
 
     const currentConfig = getEffective();
 
-    // `goal complete` moves the goal to "complete" before the turn ends, so
-    // gating on "active" alone would skip the decision for exactly the state
-    // that needs one.
-    if ((loopState.goal.status === "active" || loopState.completionClaimed) && !loopState.paused && !loopState.disabled) {
+    // A completion claim (`goal complete`) marks the goal "claimed" before
+    // the turn ends, so gating on "active" alone would skip the decision for
+    // exactly the state that needs one.
+    if (
+      (loopState.goal.status === "active" ||
+        loopState.goal.status === "claimed" ||
+        loopState.completionClaimed) &&
+      !loopState.paused &&
+      !loopState.disabled
+    ) {
       const stopReason = lastAssistantText(event);
       // The decision core is pure: it takes observed facts, not ports. Gates
       // are evidence, so they run HERE and their aggregate is passed in.
@@ -938,12 +944,42 @@ export default function (pi: {
       if (decision.kind === "continue") {
         loopState.continuations = decision.continuations;
         loopState.goal.continuationsUsed++;
-        pi.sendMessage(promptText(readPolicy(), "continuation"));
+        // A rejected claim sends the goal back to work with the verdict in
+        // the agent's context: the claim flag drops, the goal returns to
+        // active, and the continuation carries the gate's or the judge's
+        // rationale instead of the generic directive.
+        const gateFailure = gateOutcome?.aggregate === "failed" ? gateOutcome.failure : undefined;
+        const judgeRejection = judgeVerdict && !judgeVerdict.done ? judgeVerdict : undefined;
+        if (gateFailure || judgeRejection) {
+          loopState.completionClaimed = false;
+          if (loopState.goal.status === "claimed") {
+            loopState.goal.status = "active";
+            persistGoal();
+          }
+          const prefix = v2GoalPrefix(loopState.goal, loopState.goal.goalId);
+          pi.sendMessage(
+            gateFailure
+              ? gateFailureContext(gateFailure, DEFAULT_GATE_RETRIES, prefix)
+              : judgeRejection
+                ? judgeFailureContext(judgeRejection.rationale, prefix)
+                : promptText(readPolicy(), "continuation"),
+          );
+        } else {
+          pi.sendMessage(promptText(readPolicy(), "continuation"));
+        }
         loopState.scheduledContinuation = true;
         note(
-          `autonomous continuation: ${loopState.continuations}/${currentConfig.maxContinuations}. ${decision.reason ?? "no claim"}`,
+          `autonomous continuation: ${loopState.continuations}/${currentConfig.maxContinuations}. ${
+            gateFailure ? "gate failed" : judgeRejection ? "claim rejected" : (decision.reason ?? "no claim")
+          }`,
         );
       } else if (decision.kind === "settle") {
+        // Two-key completion (core.ts): only a verified or judged settle marks
+        // the goal complete; a bare claim leaves it claimed and reviewable.
+        if (decision.reason === "verified_complete" || decision.reason === "judged_complete") {
+          loopState.goal.status = "complete";
+          persistGoal();
+        }
         note(`settled: ${decision.reason}`);
         afterSettle();
       }
@@ -962,7 +998,8 @@ export default function (pi: {
     label: "Goal",
     description:
       "Own the thread goal for the autonomous loop (port of prime-agent's goal skill). " +
-      "set: start/replace the goal (objective required). pause/resume/complete: change status. " +
+      "set: start/replace the goal (objective required). pause/resume: change status. " +
+      "complete: claim the goal done — the loop's gates or judge must still confirm it. " +
       "status: report. While a goal is active the loop keeps the session working toward it " +
       "and an idle heartbeat re-checks progress.",
     approval: "read",
@@ -979,14 +1016,24 @@ export default function (pi: {
         return { content: [{ type: "text", text: `Goal active: ${objective}` }] };
       }
       if (params.action === "complete") {
-        if (loopState.goal.status !== "active") {
+        if (loopState.goal.status !== "active" && loopState.goal.status !== "claimed") {
           return { content: [{ type: "text", text: "No active goal to complete." }] };
         }
-        loopState.goal.status = "complete";
+        // A claim is not a completion: the goal moves to `claimed` and only a
+        // settle that verifies or judges it complete ends it (two-key
+        // completion, core.ts). Re-claiming a claimed goal re-records the claim.
+        loopState.goal.status = "claimed";
         loopState.completionClaimed = true;
         persistGoal();
         note("goal complete");
-        return { content: [{ type: "text", text: "Goal completed." }] };
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Goal claimed. It counts as complete only once the loop verifies it — gates pass or the judge corroborates — so keep objective evidence in the transcript.",
+            },
+          ],
+        };
       }
       if (params.action === "pause") {
         if (loopState.goal.status !== "active") {

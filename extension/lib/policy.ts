@@ -668,8 +668,12 @@ export function nextQueued(policy: Policy, repo: string | undefined): QueueItem 
 
 // -- Review queue ------------------------------------------------------------
 
-/** Settle reasons a human reviews: the loop's two ways of saying "done". */
-export const REVIEWABLE = ["judged_complete", "claimed_unverified"] as const;
+/**
+ * Settle reasons a human reviews: the loop's ways of leaving a claim open —
+ * a claim the judge corroborated, a bare claim, and a claim the judge could
+ * not reach. A gate-verified pass needs no review.
+ */
+export const REVIEWABLE = ["judged_complete", "claimed_unverified", "judge_unavailable"] as const;
 
 export interface LogEvent {
   readonly ts: string;

@@ -108,10 +108,12 @@ function liveSession() {
   const handlers: Record<string, (event?: unknown, ctx?: unknown) => unknown> = {};
   const said: string[] = [];
   const sent: string[] = [];
+  const entries: { customType: string; data: unknown }[] = [];
   let tool: Tool | undefined;
   let onSaid: ((m: string) => void) | undefined;
   const pi = {
     ...makePi(handlers),
+    appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
     sendUserMessage: (m: string) => {
       said.push(m);
       onSaid?.(m);
@@ -130,8 +132,39 @@ function liveSession() {
     };
     return promise;
   };
-  return { handlers, said, sent, heard, goal: () => tool! };
+  return { handlers, said, sent, heard, goal: () => tool!, entries };
 }
+
+const eventsLog = join(stateDir, "events.jsonl");
+const eventCount = (needle: string): number =>
+  existsSync(eventsLog) ? readFileSync(eventsLog, "utf8").split(needle).length - 1 : 0;
+
+/**
+ * Polls the event log until `needle` appears more than `atLeast` times. Real
+ * polling because the sink appends asynchronously and exposes no promise, so
+ * there is no signal to await (same as the gates test below); the interval is
+ * a bounded wait on a real side effect, not a guess at one.
+ */
+async function logged(needle: string, atLeast = 0): Promise<boolean> {
+  for (let i = 0; i < 100; i++) {
+    if (eventCount(needle) > atLeast) return true;
+    await Bun.sleep(20);
+  }
+  return false;
+}
+
+/** The goal tool's status line: the observable goal state between stops. */
+async function goalStatus(tool: Tool): Promise<string> {
+  const res = (await tool.execute("status-check", { action: "status" })) as { content: { text: string }[] };
+  return res.content[0]!.text;
+}
+
+/** A fresh git repo, so worktree attestation has something to attest. */
+const gitRepo = (): string => {
+  const repo = mkdtempSync(join(tmpdir(), "loop-repo-"));
+  execSync("git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init", { cwd: repo });
+  return repo;
+};
 
 const policy = (...ops: Parameters<typeof encodeOp>[0][]) =>
   appendFileSync(join(stateDir, "policy.jsonl"), ops.map((op) => encodeOp(op, Date.now(), "test")).join(""));
@@ -184,4 +217,76 @@ test("gates set on the dashboard make verified_complete reachable", { skip: !has
   const settled = () => existsSync(log) && readFileSync(log, "utf8").includes("settled: verified_complete");
   for (let i = 0; i < 100 && !settled(); i++) await Bun.sleep(20);
   assert.ok(settled(), readFileSync(log, "utf8"));
+});
+
+// --- claim is not completion -----------------------------------------------
+
+test("goal complete claims the goal instead of completing it", async () => {
+  const { goal } = liveSession();
+  await goal().execute("t1", { action: "set", objective: "prove the loop" });
+  const before = eventCount("goal complete");
+  await goal().execute("t2", { action: "complete" });
+  assert.match(await goalStatus(goal()), /Status: claimed/);
+  assert.doesNotMatch(await goalStatus(goal()), /Status: complete/);
+  // The claim still notes `goal complete` for the record — one more than before.
+  assert.ok(await logged("goal complete", before), "the claim is noted for the record");
+});
+
+test("a bare claim settles claimed_unverified and the goal stays claimed, reviewable", async () => {
+  const { handlers, goal } = liveSession();
+  await goal().execute("t1", { action: "set", objective: "unproven work" });
+  await goal().execute("t2", { action: "complete" });
+  await handlers.session_stop({ messages: [{ role: "assistant", content: "done" }] }, { hasUI: true, cwd: isolated });
+  assert.ok(await logged("settled: claimed_unverified"), "the cycle settles as claimed_unverified");
+  assert.match(await goalStatus(goal()), /Status: claimed/);
+});
+
+test("a judge-rejected claim returns the goal to active with the rationale in the prompt", async () => {
+  // A local OpenAI-shaped endpoint answers UNVERIFIED, so the judge runs
+  // without leaving the process and the verdict is deterministic.
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => Response.json({ choices: [{ message: { content: "the transcript shows no test run.\nUNVERIFIED" } }] }),
+  });
+  process.env.OMP_AUTO_LOOP_JUDGE_MODEL = "test-judge";
+  process.env.OMP_AUTO_LOOP_JUDGE_BASE_URL = `http://127.0.0.1:${server.port}/v1`;
+  try {
+    const { handlers, goal, sent } = liveSession();
+    await goal().execute("t1", { action: "set", objective: "corroborated work" });
+    await goal().execute("t2", { action: "complete" });
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "it is done" }] }, { hasUI: true, cwd: isolated });
+    assert.equal(sent.length, 1, "exactly the continuation prompt is sent");
+    assert.match(sent[0]!, /\[auto-loop: judge-rejected\]/);
+    assert.match(sent[0]!, /the transcript shows no test run\./);
+    assert.match(await goalStatus(goal()), /Status: active/);
+  } finally {
+    delete process.env.OMP_AUTO_LOOP_JUDGE_MODEL;
+    delete process.env.OMP_AUTO_LOOP_JUDGE_BASE_URL;
+    server.stop(true);
+  }
+});
+
+test("a gate-failed claim returns the goal to active with the failure in the prompt", { skip: !hasGit && "needs git for worktree attestation" }, async () => {
+  const repo = gitRepo();
+  policy({ op: "gates", repo: basename(repo), commands: ["exit 3"] });
+  const { handlers, goal, sent } = liveSession();
+  await goal().execute("t1", { action: "set", objective: "make the gate green" });
+  await goal().execute("t2", { action: "complete" });
+  await handlers.session_stop({ messages: [{ role: "assistant", content: "done, trust me" }] }, { hasUI: true, cwd: repo });
+  assert.equal(sent.length, 1, "exactly the continuation prompt is sent");
+  assert.match(sent[0]!, /\[auto-loop: gate-failed\]/);
+  assert.match(sent[0]!, /`exit 3` exited 3/);
+  assert.match(await goalStatus(goal()), /Status: active/);
+});
+
+test("a verified settle marks the goal complete", { skip: !hasGit && "needs git for worktree attestation" }, async () => {
+  const repo = gitRepo();
+  policy({ op: "gates", repo: basename(repo), commands: ["true"] });
+  const { handlers, goal } = liveSession();
+  await goal().execute("t1", { action: "set", objective: "ship it" });
+  await goal().execute("t2", { action: "complete" });
+  const before = eventCount("settled: verified_complete");
+  await handlers.session_stop({ messages: [{ role: "assistant", content: "done" }] }, { hasUI: true, cwd: repo });
+  assert.ok(await logged("settled: verified_complete", before), "the gate set verified the claim");
+  assert.match(await goalStatus(goal()), /Status: complete/);
 });
