@@ -43,14 +43,31 @@ extension/
 - **Budgets**: each user input starts a cycle with 3 continuations and a
   30-minute wall-clock timeout (prime-agent defaults).
 - **Settles keep working**: when the model tries to stop, open questions
-  are assumed-and-verified and the loop continues until gates pass, the
-  model reports `AUTOLOOP:DONE`, or a cap trips.
+  are assumed-and-verified and the loop continues until gates pass, a
+  completion claim is verified or judged, or a cap trips.
 - **Gates**: `OMP_AUTO_LOOP_GATES` (JSON array of verifier commands) — when
   set, gates are the termination authority, retried up to
   `OMP_AUTO_LOOP_GATE_RETRIES` with `OMP_AUTO_LOOP_GATE_TIMEOUT_MS` per
   attempt.
 - **Goal tool**: a model-driven tool arms a goal; an idle heartbeat keeps
-  nudging the session while a goal is active.
+  nudging the session while a goal is `active`. Statuses: `active`,
+  `claimed`, `paused`, `parked`, `complete`. `complete` only *claims* —
+  the goal moves to `claimed` (still noted `goal complete` for the
+  record) and only a settle of `judged_complete` or `verified_complete`
+  marks it `complete`; `claimed_unverified` and `judge_unavailable`
+  leave it `claimed`, reviewable on the dashboard. A rejected claim — a
+  gate failure or a judge rejection — drops the claim, returns the goal
+  to `active`, and puts the gate output or the judge's rationale into
+  the continuation prompt instead of the generic directive.
+- **Parking**: a goal that keeps settling `cycle_timeout` or `error`
+  while its blocker fingerprint (settle reason + worktree digest) is
+  unchanged is stuck on something external. After `parkAfter`
+  consecutive unchanged blocker settles (policy param, default 3, `0`
+  disables) the goal parks: status `parked`, the last blocker recorded,
+  a `settled: parked_blocked` note, and no further settles, decisions,
+  or heartbeats. Parking survives a restart; only the operator `reopen`
+  control action resumes a parked goal, with a fresh cycle and the
+  blocker in the agent's context.
 - **Slash command**: `/autoloop` arms/disarms the goal loop from chat.
 - **Env vars**: `OMP_AUTO_LOOP_MAX_CONTINUATIONS`,
   `OMP_AUTO_LOOP_TIMEOUT_MS`, `OMP_AUTO_LOOP_GATES`,

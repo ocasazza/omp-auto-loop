@@ -216,8 +216,6 @@ async function worktreeSnapshot(
     .digest("hex");
 }
 
-const DONE_MARKER = "AUTOLOOP:DONE";
-
 export interface GoalState {
   status: "idle" | "active" | "claimed" | "paused" | "parked" | "complete";
   objective: string;
