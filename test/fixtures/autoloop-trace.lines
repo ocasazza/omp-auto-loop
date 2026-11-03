@@ -1,0 +1,36 @@
+N|sa1|planner|session|active-goal,main|cwd=/w/alpha;continuations=1;max_continuations=5;heartbeats=2;model=opus|fix the flaky gate
+N|rac6ec850|alpha|repo|alpha|root=/w/alpha
+N|g41f03921|fix the flaky gate|goal|active||fix the flaky gate
+N|ca72fc4b6|bun test|gate|||bun test
+N|ea1_1|goal set: fix the flaky gate|event|goal|ts=2026-10-04T01:00:00.000Z;sess=planner|goal set: fix the flaky gate
+N|sa2|coder|session|active-goal,sub|cwd=/w/alpha;continuations=0;max_continuations=5;heartbeats=0|fix the flaky gate
+N|cf8ffa805|nix flake check|gate|||nix flake check
+N|ea2_1|continue: 1/5|event|other|ts=2026-10-04T01:01:00.000Z;sess=coder|continue: 1/5
+N|ea1_2|gate: bun test passed|event|other|ts=2026-10-04T01:02:00.000Z;sess=planner|gate: bun test passed
+N|sb1|reviewer|session|no-goal,main,verified|cwd=/w/beta;continuations=1;max_continuations=5;heartbeats=2|audit the queue
+N|r6876c87e|beta|repo|beta|root=/w/beta
+N|g03b22dc4|audit the queue|goal|complete||audit the queue
+N|eb1_1|goal set: audit the queue|event|goal|ts=2026-10-04T01:03:00.000Z;sess=reviewer|goal set: audit the queue
+N|eb1_2|settled: claimed_unverified|event|settled|ts=2026-10-04T01:04:00.000Z;sess=reviewer|settled: claimed_unverified
+N|ea1_3|settled: judged_complete|event|settled|ts=2026-10-04T01:05:00.000Z;sess=planner|settled: judged_complete
+E|sa1|rac6ec850|in_repo
+E|sa1|g41f03921|pursues
+E|sa1|ca72fc4b6|runs_gate
+E|sa1|ea1_1|emitted
+E|sa2|rac6ec850|in_repo
+E|sa2|g41f03921|pursues
+E|sa2|ca72fc4b6|runs_gate
+E|sa2|cf8ffa805|runs_gate
+E|sa1|sa2|spawned
+E|sa2|ea2_1|emitted
+E|sa1|ea1_2|emitted
+E|ea1_1|ea1_2|next
+E|sb1|r6876c87e|in_repo
+E|sb1|g03b22dc4|pursues
+E|sb1|eb1_1|emitted
+E|sb1|eb1_2|emitted
+E|eb1_1|eb1_2|next
+E|sa1|ea1_3|emitted
+E|ea1_2|ea1_3|next
+N|s90001|legacy-a|session|no-goal|cwd=/w/alpha
+N|s90002|legacy-b|session|no-goal|cwd=/w/beta;continuations=2;max_continuations=3

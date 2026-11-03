@@ -41,6 +41,7 @@ import {
   type Vocabulary,
 } from "./policy.ts";
 import { proposeImprovement } from "./reflect.ts";
+import { projectSite } from "./site.ts";
 import {
   classify,
   DECISION_KINDS,
@@ -1230,6 +1231,12 @@ export function createDashboard(options: {
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
       res.end(projection);
       return;
+    }
+
+    // The control site panel-kit's host glues along repo: the shape the
+    // autoloop-control grammar parses, per its conformance fixture.
+    if (path === "/api/site") {
+      return reply(res, 200, projectSite({ projection, events, policy, limits: options.limits?.() ?? DEFAULT_LIMITS }));
     }
 
     const state = parseProjection(projection, events);

@@ -1,0 +1,614 @@
+{
+  "objects": [
+    {
+      "id": "claim:planner#a1@2026-10-04T01:05:00.000Z",
+      "title": "fix the flaky gate",
+      "sort": "claim",
+      "tags": [
+        "judged_complete",
+        "unreviewed"
+      ],
+      "session": "planner#a1",
+      "ts": "2026-10-04T01:05:00.000Z",
+      "reason": "judged_complete",
+      "judge": "",
+      "decision": "",
+      "note": ""
+    },
+    {
+      "id": "claim:reviewer#b1@2026-10-04T01:04:00.000Z",
+      "title": "audit the queue",
+      "sort": "claim",
+      "tags": [
+        "claimed_unverified",
+        "unreviewed"
+      ],
+      "session": "reviewer#b1",
+      "ts": "2026-10-04T01:04:00.000Z",
+      "reason": "claimed_unverified",
+      "judge": "",
+      "decision": "",
+      "note": ""
+    },
+    {
+      "id": "proposal:p1",
+      "title": "Continuations per cycle",
+      "sort": "proposal",
+      "tags": [
+        "pending"
+      ],
+      "status": "pending",
+      "target": "param:maxContinuations",
+      "before": "",
+      "after": "6",
+      "rationale": "sessions run out",
+      "source": "reflect",
+      "at": "1970-01-01T00:00:00.004Z"
+    },
+    {
+      "id": "queued_goal:q1",
+      "title": "retire the html page",
+      "sort": "queued_goal",
+      "tags": [
+        "queued"
+      ],
+      "status": "queued",
+      "repo": "beta",
+      "priority": "1",
+      "claimed_by": "",
+      "category": ""
+    },
+    {
+      "id": "rac6ec850",
+      "title": "alpha",
+      "sort": "repo",
+      "tags": [
+        "alpha"
+      ],
+      "root": "/w/alpha"
+    },
+    {
+      "id": "r6876c87e",
+      "title": "beta",
+      "sort": "repo",
+      "tags": [
+        "beta"
+      ],
+      "root": "/w/beta"
+    },
+    {
+      "id": "repo_policy:alpha",
+      "title": "alpha",
+      "sort": "repo_policy",
+      "tags": [
+        "gated"
+      ],
+      "gates": "bun test\nnix flake check",
+      "criteria": ""
+    },
+    {
+      "id": "repo_policy:beta",
+      "title": "beta",
+      "sort": "repo_policy",
+      "tags": [
+        "judge-checked"
+      ],
+      "gates": "",
+      "criteria": "pushed and green"
+    },
+    {
+      "id": "term:event:continue",
+      "title": "Continue",
+      "sort": "term",
+      "tags": [
+        "event",
+        "branch"
+      ],
+      "hidden": "false",
+      "vocabulary": "event",
+      "term": "continue",
+      "description": "A continuation was issued for the active goal.",
+      "count": "0"
+    },
+    {
+      "id": "term:event:gate",
+      "title": "Gate",
+      "sort": "term",
+      "tags": [
+        "event",
+        "branch"
+      ],
+      "hidden": "false",
+      "vocabulary": "event",
+      "term": "gate",
+      "description": "A gate set passed or failed (\"gate failed\", \"gates passed\").",
+      "count": "0"
+    },
+    {
+      "id": "term:event:goal",
+      "title": "Goal",
+      "sort": "term",
+      "tags": [
+        "event",
+        "branch"
+      ],
+      "hidden": "false",
+      "vocabulary": "event",
+      "term": "goal",
+      "description": "A goal was set, completed, or cleared.",
+      "count": "2"
+    },
+    {
+      "id": "term:event:heartbeat",
+      "title": "Heartbeat",
+      "sort": "term",
+      "tags": [
+        "event",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "event",
+      "term": "heartbeat",
+      "description": "An idle session was nudged toward its goal.",
+      "count": "0"
+    },
+    {
+      "id": "term:event:settled",
+      "title": "Settled",
+      "sort": "term",
+      "tags": [
+        "event",
+        "branch"
+      ],
+      "hidden": "false",
+      "vocabulary": "event",
+      "term": "settled",
+      "description": "The cycle closed; the reason follows in the message.",
+      "count": "2"
+    },
+    {
+      "id": "term:event:other",
+      "title": "Other",
+      "sort": "term",
+      "tags": [
+        "event",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "event",
+      "term": "other",
+      "description": "Matched no declared class.",
+      "count": "2"
+    },
+    {
+      "id": "term:settle:headless",
+      "title": "Headless",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "headless",
+      "description": "A headless run without opt-in: no-op, never a settle.",
+      "count": "0"
+    },
+    {
+      "id": "term:settle:scheduled_continuation",
+      "title": "Scheduled continuation",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "scheduled_continuation",
+      "description": "A scheduled nudge, consumed once: no-op, never a settle.",
+      "count": "0"
+    },
+    {
+      "id": "term:settle:error",
+      "title": "Error",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "error",
+      "description": "The turn ended in an error.",
+      "count": "0"
+    },
+    {
+      "id": "term:settle:aborted",
+      "title": "Aborted",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "aborted",
+      "description": "The turn was aborted.",
+      "count": "0"
+    },
+    {
+      "id": "term:settle:verified_complete",
+      "title": "Verified complete",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "verified_complete",
+      "description": "The gate set passed: the only reason that counts as verified.",
+      "count": "0"
+    },
+    {
+      "id": "term:settle:claimed_unverified",
+      "title": "Claimed, unverified",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "claimed_unverified",
+      "description": "The model claimed completion with neither gate nor judge.",
+      "count": "1"
+    },
+    {
+      "id": "term:settle:judged_complete",
+      "title": "Judged complete",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "judged_complete",
+      "description": "A judge verdict marked the work done.",
+      "count": "1"
+    },
+    {
+      "id": "term:settle:judge_unavailable",
+      "title": "Judge unavailable",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "judge_unavailable",
+      "description": "A judge was expected but produced no usable verdict; never a pass.",
+      "count": "0"
+    },
+    {
+      "id": "term:settle:continuation_limit",
+      "title": "Continuation limit",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "continuation_limit",
+      "description": "maxContinuations was reached.",
+      "count": "0"
+    },
+    {
+      "id": "term:settle:cycle_timeout",
+      "title": "Cycle timeout",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "cycle_timeout",
+      "description": "The elapsed cap for the cycle was reached.",
+      "count": "0"
+    },
+    {
+      "id": "term:settle:gate_retries_exhausted",
+      "title": "Gate retries exhausted",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "gate_retries_exhausted",
+      "description": "The gate set exhausted its retries.",
+      "count": "0"
+    },
+    {
+      "id": "term:settle:gate_deadline",
+      "title": "Gate deadline",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "gate_deadline",
+      "description": "The gate set exceeded its deadline.",
+      "count": "0"
+    },
+    {
+      "id": "term:settle:gate_unavailable",
+      "title": "Gate unavailable",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "gate_unavailable",
+      "description": "A gate could not be run.",
+      "count": "0"
+    },
+    {
+      "id": "term:settle:stale_result",
+      "title": "Stale result",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "stale_result",
+      "description": "A gate result predated the current worktree.",
+      "count": "0"
+    },
+    {
+      "id": "term:decision:continue",
+      "title": "Continue",
+      "sort": "term",
+      "tags": [
+        "decision",
+        "branch"
+      ],
+      "hidden": "false",
+      "vocabulary": "decision",
+      "term": "continue",
+      "description": "Run another turn against the same goal.",
+      "count": ""
+    },
+    {
+      "id": "term:decision:settle",
+      "title": "Settle",
+      "sort": "term",
+      "tags": [
+        "decision",
+        "branch"
+      ],
+      "hidden": "false",
+      "vocabulary": "decision",
+      "term": "settle",
+      "description": "Close the cycle; `reason` records why.",
+      "count": ""
+    },
+    {
+      "id": "term:decision:verify",
+      "title": "Verify",
+      "sort": "term",
+      "tags": [
+        "decision",
+        "branch"
+      ],
+      "hidden": "false",
+      "vocabulary": "decision",
+      "term": "verify",
+      "description": "Run the configured gate set, then decide again with its outcome.",
+      "count": ""
+    },
+    {
+      "id": "term:decision:no-op",
+      "title": "No-op",
+      "sort": "term",
+      "tags": [
+        "decision",
+        "branch"
+      ],
+      "hidden": "false",
+      "vocabulary": "decision",
+      "term": "no-op",
+      "description": "Take no action; `reason` records why.",
+      "count": ""
+    },
+    {
+      "id": "term:edge:in_repo",
+      "title": "In repo",
+      "sort": "term",
+      "tags": [
+        "edge",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "edge",
+      "term": "in_repo",
+      "description": "session -> repo",
+      "count": ""
+    },
+    {
+      "id": "term:edge:pursues",
+      "title": "Pursues",
+      "sort": "term",
+      "tags": [
+        "edge",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "edge",
+      "term": "pursues",
+      "description": "session -> goal",
+      "count": ""
+    },
+    {
+      "id": "term:edge:runs_gate",
+      "title": "Runs gate",
+      "sort": "term",
+      "tags": [
+        "edge",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "edge",
+      "term": "runs_gate",
+      "description": "session -> gate",
+      "count": ""
+    },
+    {
+      "id": "term:edge:spawned",
+      "title": "Spawned",
+      "sort": "term",
+      "tags": [
+        "edge",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "edge",
+      "term": "spawned",
+      "description": "session -> session",
+      "count": ""
+    },
+    {
+      "id": "term:edge:emitted",
+      "title": "Emitted",
+      "sort": "term",
+      "tags": [
+        "edge",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "edge",
+      "term": "emitted",
+      "description": "session -> event",
+      "count": ""
+    },
+    {
+      "id": "term:edge:next",
+      "title": "Next",
+      "sort": "term",
+      "tags": [
+        "edge",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "edge",
+      "term": "next",
+      "description": "event -> event",
+      "count": ""
+    },
+    {
+      "id": "param:maxContinuations",
+      "title": "Continuations per cycle",
+      "sort": "param",
+      "tags": [
+        "count",
+        "default"
+      ],
+      "value": "3",
+      "description": "How many times the loop pushes an agent onward before it stops.",
+      "min": "0",
+      "max": "50"
+    },
+    {
+      "id": "param:timeoutMs",
+      "title": "Cycle time limit",
+      "sort": "param",
+      "tags": [
+        "ms",
+        "default"
+      ],
+      "value": "1800000",
+      "description": "Elapsed cap on one cycle; the loop settles cycle_timeout past it.",
+      "min": "60000",
+      "max": "21600000"
+    },
+    {
+      "id": "param:queueAutoPull",
+      "title": "Pull the next queued goal on settle",
+      "sort": "param",
+      "tags": [
+        "flag",
+        "default"
+      ],
+      "value": "0",
+      "description": "When a cycle settles, the session claims the top queued goal for its repo.",
+      "min": "0",
+      "max": "1"
+    },
+    {
+      "id": "param:reflect",
+      "title": "Propose improvements after settles",
+      "sort": "param",
+      "tags": [
+        "flag",
+        "default"
+      ],
+      "value": "1",
+      "description": "Run the reflect pass after a settle; it files at most one pending proposal.",
+      "min": "0",
+      "max": "1"
+    },
+    {
+      "id": "prompt:continuation",
+      "title": "Continuation directive",
+      "sort": "prompt",
+      "tags": [
+        "default"
+      ],
+      "text": "No human input is available while the autonomous loop is running. Continue working until the task is complete or the loop's limits stop the run. If you were about to ask the user a question, make a reasonable assumption and verify it. If you believe you are blocked, prove it with host-observable evidence (command output, file state), preserve that evidence, and keep looking for safe progress while budget remains.",
+      "description": "Sent to the agent each time the loop continues instead of stopping."
+    },
+    {
+      "id": "prompt:judgeCriteria",
+      "title": "Extra judge criteria",
+      "sort": "prompt",
+      "tags": [
+        "default"
+      ],
+      "text": "",
+      "description": "Appended to the judge rubric. The verdict-token contract stays fixed."
+    }
+  ],
+  "morphisms": [
+    {
+      "domain": "repo_policy:alpha",
+      "codomain": "rac6ec850",
+      "sort": "governs"
+    },
+    {
+      "domain": "repo_policy:beta",
+      "codomain": "r6876c87e",
+      "sort": "governs"
+    },
+    {
+      "domain": "queued_goal:q1",
+      "codomain": "r6876c87e",
+      "sort": "targets"
+    },
+    {
+      "domain": "proposal:p1",
+      "codomain": "param:maxContinuations",
+      "sort": "revises"
+    }
+  ]
+}
