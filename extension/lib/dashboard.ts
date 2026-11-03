@@ -42,6 +42,7 @@ import {
   type Vocabulary,
 } from "./policy.ts";
 import { proposeImprovement } from "./reflect.ts";
+import { parseSiteWrite, projectSite, translateSiteEdit, type SiteSteer } from "./site.ts";
 import {
   classify,
   DECISION_KINDS,
@@ -1219,6 +1220,38 @@ export function createDashboard(options: {
       );
     }
 
+    // The panel-kit host's write: the emitter's revision of the changed
+    // record(s). Each revised record is translated back into the PolicyOp —
+    // and, for an overturned claim, the reopen steering command — the loop
+    // already understands. Nothing is appended unless every record
+    // translates and validates, so a refused write leaves no half-edit.
+    if (path === "/api/site" && req.method !== "GET") {
+      return writeRoute(
+        (body) => {
+          const parsed = parseSiteWrite(body);
+          if ("error" in parsed) return reply(res, 400, { error: parsed.error });
+          const site = projectSite({ projection, events, policy, limits: options.limits?.() ?? DEFAULT_LIMITS });
+          const ops: PolicyOp[] = [];
+          let steer: SiteSteer | undefined;
+          for (const written of parsed.records) {
+            const result = translateSiteEdit(written, site);
+            if ("error" in result) return reply(res, result.status, { error: result.error });
+            for (const op of result.ops) {
+              const checked = validateOp(op);
+              if ("error" in checked) return reply(res, 400, { error: checked.error });
+              ops.push(checked.op);
+            }
+            if (result.steer) steer = result.steer;
+          }
+          for (const op of ops) options.writePolicy?.(op);
+          if (steer && options.steer) options.steer(steer);
+          reply(res, 202, { ok: true });
+        },
+        !!options.writePolicy,
+        "site editing",
+      );
+    }
+
     if (path === "/api/reflect") {
       return writeRoute(
         async () => {
@@ -1229,6 +1262,20 @@ export function createDashboard(options: {
         !!options.reflect,
         "the reflect pass",
       );
+    }
+
+    // panel-kit's autoloop host parses this with the trace grammar
+    // (autoloop-trace): the projection lines, verbatim, as text.
+    if (path === "/api/trace") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      res.end(projection);
+      return;
+    }
+
+    // The control site panel-kit's host glues along repo: the shape the
+    // autoloop-control grammar parses, per its conformance fixture.
+    if (path === "/api/site") {
+      return reply(res, 200, projectSite({ projection, events, policy, limits: options.limits?.() ?? DEFAULT_LIMITS }));
     }
 
     const state = parseProjection(projection, events);
