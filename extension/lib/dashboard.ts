@@ -1224,6 +1224,14 @@ export function createDashboard(options: {
       );
     }
 
+    // panel-kit's autoloop host parses this with the trace grammar
+    // (autoloop-trace): the projection lines, verbatim, as text.
+    if (path === "/api/trace") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      res.end(projection);
+      return;
+    }
+
     const state = parseProjection(projection, events);
     const view = () =>
       controlView(state, policy, options.limits?.() ?? DEFAULT_LIMITS, !!options.reflect);
