@@ -372,3 +372,32 @@ test("reopen un-parks a parked goal with a fresh cycle", { skip: !hasGit && "nee
     delete process.env.OMP_AUTO_LOOP_TIMEOUT_MS;
   }
 });
+
+// The heartbeat is a real interval — the wall-clock behavior is the thing
+// under test — so these waits are the exercised behavior, not a guess at it;
+// every negative assertion is guarded by the tick's own status check and so
+// cannot flake with load.
+test("a goal set mid-session gets heartbeats; a parked goal stops getting them", async () => {
+  process.env.OMP_AUTO_LOOP_HEARTBEAT_MS = "20";
+  try {
+    const { handlers, goal, sent } = liveSession();
+    const idleCtx = { hasUI: true, cwd: isolated, isIdle: () => true };
+    await handlers.session_start({}, idleCtx);
+    await Bun.sleep(150);
+    assert.ok(!sent.includes("heartbeat"), "no goal, no nudge");
+    await goal().execute("t1", { action: "set", objective: "nudge me" });
+    await Bun.sleep(150);
+    assert.ok(sent.includes("heartbeat"), "a goal set mid-session still gets nudges");
+    // Park it: timeout 0 settles cycle_timeout, parkAfter 1 parks at once.
+    process.env.OMP_AUTO_LOOP_TIMEOUT_MS = "0";
+    policy({ op: "param", key: "parkAfter", value: 1 });
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "blocked" }] }, idleCtx);
+    assert.match(await goalStatus(goal()), /Status: parked/);
+    sent.length = 0;
+    await Bun.sleep(150);
+    assert.deepEqual(sent, [], "a parked goal is not nudged");
+  } finally {
+    delete process.env.OMP_AUTO_LOOP_HEARTBEAT_MS;
+    delete process.env.OMP_AUTO_LOOP_TIMEOUT_MS;
+  }
+});

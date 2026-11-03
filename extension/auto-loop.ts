@@ -642,6 +642,8 @@ export default function (pi: {
   // restarted or resumed session stays one hub; the pid is only a fallback
   // before any handler has delivered a context.
   let heartbeats = 0;
+  /** The session's idle-nudge timer; only unref is needed off it. */
+  let heartbeatTimer: { unref?: () => void } | undefined;
   let outcome: string | null = null;
   const repoByCwd = new Map<string, RepoRef | null>();
   // Subagents run as further extension instances in this process; this
@@ -894,16 +896,19 @@ export default function (pi: {
     }
     // resumeFromLog should be called after loopState is initialized and potentially restored
     resumeFromLog();
-    if (loopState.goal.status === "active" && getEffective().heartbeatMs > 0) {
-      // Schedule heartbeat only if goal is active and heartbeat is enabled
-      const heartbeatInterval = setInterval(() => {
+    // Armed once per session, not per goal: the tick re-checks the goal
+    // status, so a goal set (or parked) mid-session is handled without
+    // re-arming. Only an active goal is nudged — a claimed goal awaits
+    // review and a parked goal is out of the loop.
+    if (getEffective().heartbeatMs > 0 && !heartbeatTimer) {
+      heartbeatTimer = setInterval(() => {
         if (sessionIdle() && loopState.goal.status === "active") {
           loopState.lastNudgeAt = Date.now();
           pi.sendMessage("heartbeat");
           heartbeats++;
         }
       }, getEffective().heartbeatMs);
-      // Clean up on session_stop (will be registered below)
+      if (typeof heartbeatTimer.unref === "function") heartbeatTimer.unref();
     }
   });
 
