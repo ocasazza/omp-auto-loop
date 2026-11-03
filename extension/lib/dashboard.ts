@@ -400,7 +400,7 @@ export interface ControlView {
   readonly policy: Policy;
   readonly review: readonly Verdict[];
   /** The limits a session without its own override runs with right now. */
-  readonly limits: { readonly maxContinuations: number; readonly timeoutMs: number };
+  readonly limits: { readonly maxContinuations: number; readonly timeoutMs: number; readonly parkAfter: number };
   /** Whether a reflect pass can run from this page (a model is configured). */
   readonly reflectAvailable: boolean;
   /** Event counts per class, with operator rules applied. */
@@ -836,7 +836,7 @@ function renderActivity(state: DashboardState, view: ControlView, now: number): 
 </section>`;
 }
 
-const DEFAULT_LIMITS = { maxContinuations: 3, timeoutMs: 30 * 60 * 1000 };
+const DEFAULT_LIMITS = { maxContinuations: 3, timeoutMs: 30 * 60 * 1000, parkAfter: DEFAULT_PARK_AFTER };
 
 export function renderDashboard(state: DashboardState, view?: ControlView): string {
   const v = view ?? controlView(state, EMPTY_POLICY, DEFAULT_LIMITS, false);
@@ -1339,7 +1339,7 @@ export function hostDashboard(options: {
   files: DashboardFiles;
   /** The judge model, which the reflect pass also uses. Absent means no proposals. */
   chat?: ChatPort;
-  limits: () => { maxContinuations: number; timeoutMs: number };
+  limits: () => { maxContinuations: number; timeoutMs: number; parkAfter: number };
   onError?: (message: string) => void;
   onListening?: (url: string) => void;
 }): { close: () => void; url: string } {

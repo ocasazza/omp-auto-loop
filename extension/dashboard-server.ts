@@ -22,7 +22,7 @@ import {
 } from "./lib/config.ts";
 import { hostDashboard } from "./lib/dashboard.ts";
 import { chatFromEnv } from "./lib/model.ts";
-import { foldPolicy } from "./lib/policy.ts";
+import { DEFAULT_PARK_AFTER, foldPolicy } from "./lib/policy.ts";
 
 const read = (file: string): string => {
   try {
@@ -73,7 +73,7 @@ hostDashboard({
   chat: chatFromEnv(process.env),
   limits: () => {
     const { maxContinuations, timeoutMs } = effective("");
-    return { maxContinuations, timeoutMs };
+    return { maxContinuations, timeoutMs, parkAfter: DEFAULT_PARK_AFTER };
   },
   // A port it cannot have is a failure for the supervisor to see and back
   // off from, not a page that silently never appears.

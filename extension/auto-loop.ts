@@ -830,7 +830,11 @@ export default function (pi: {
           },
         },
         chat,
-        limits: () => ({ maxContinuations: getEffective().maxContinuations, timeoutMs: getEffective().timeoutMs }),
+        limits: () => ({
+          maxContinuations: getEffective().maxContinuations,
+          timeoutMs: getEffective().timeoutMs,
+          parkAfter: DEFAULT_PARK_AFTER,
+        }),
         // Another session already serving the port is the normal case on a
         // host running more than one session; only a real failure is news.
         onError: (message) => {
