@@ -108,12 +108,13 @@ function liveSession() {
   const handlers: Record<string, (event?: unknown, ctx?: unknown) => unknown> = {};
   const said: string[] = [];
   const sent: string[] = [];
-  const entries: { customType: string; data: unknown }[] = [];
+  const entries: Entry[] = [];
   let tool: Tool | undefined;
   let onSaid: ((m: string) => void) | undefined;
   const pi = {
     ...makePi(handlers),
-    appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
+    // Same shape the runtime writes, so a restart test can replay them verbatim.
+    appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     sendUserMessage: (m: string) => {
       said.push(m);
       onSaid?.(m);
@@ -289,4 +290,85 @@ test("a verified settle marks the goal complete", { skip: !hasGit && "needs git 
   await handlers.session_stop({ messages: [{ role: "assistant", content: "done" }] }, { hasUI: true, cwd: repo });
   assert.ok(await logged("settled: verified_complete", before), "the gate set verified the claim");
   assert.match(await goalStatus(goal()), /Status: complete/);
+});
+
+// --- parking on external blockers -------------------------------------------
+
+test("repeated unchanged blocker settles park the goal; a state change resets the count", { skip: !hasGit && "needs git for worktree attestation" }, async () => {
+  const repo = gitRepo();
+  policy({ op: "param", key: "parkAfter", value: 3 });
+  process.env.OMP_AUTO_LOOP_TIMEOUT_MS = "0"; // every stop settles cycle_timeout
+  try {
+    const { handlers, goal, sent } = liveSession();
+    await goal().execute("t1", { action: "set", objective: "blocked on the registry" });
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "waiting" }] }, { hasUI: true, cwd: repo });
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "waiting" }] }, { hasUI: true, cwd: repo });
+    assert.match(await goalStatus(goal()), /Status: active/, "two blockers is short of parkAfter 3");
+    // The worktree changes, so the blocker fingerprint no longer matches: the streak restarts.
+    writeFileSync(join(repo, "progress.txt"), "work happened\n");
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "waiting" }] }, { hasUI: true, cwd: repo });
+    assert.match(await goalStatus(goal()), /Status: active/, "a changed state resets the count");
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "still blocked" }] }, { hasUI: true, cwd: repo });
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "still blocked" }] }, { hasUI: true, cwd: repo });
+    assert.ok(await logged("settled: parked_blocked"), "the parking is recorded in the log");
+    assert.match(await goalStatus(goal()), /Status: parked/);
+    // Parked goals are out of the loop: a further stop decides nothing.
+    const settles = eventCount("settled: ");
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "still blocked" }] }, { hasUI: true, cwd: repo });
+    assert.deepEqual(sent, [], "a parked goal gets no continuation");
+    assert.equal(eventCount("settled: "), settles, "a parked goal is not settled again");
+    assert.match(await goalStatus(goal()), /Status: parked/);
+  } finally {
+    delete process.env.OMP_AUTO_LOOP_TIMEOUT_MS;
+  }
+});
+
+test("a parked goal survives a restart", { skip: !hasGit && "needs git for worktree attestation" }, async () => {
+  const repo = gitRepo();
+  policy({ op: "param", key: "parkAfter", value: 1 });
+  process.env.OMP_AUTO_LOOP_TIMEOUT_MS = "0";
+  try {
+    const first = liveSession();
+    await first.goal().execute("t1", { action: "set", objective: "stuck on flaky infra" });
+    await first.handlers.session_stop({ messages: [{ role: "assistant", content: "registry 503s" }] }, { hasUI: true, cwd: repo });
+    assert.match(await goalStatus(first.goal()), /Status: parked/);
+    // A fresh process replays the persisted goal entries through session_start.
+    const goalEntries = first.entries.filter((e) => e.customType === "auto_loop_goal");
+    const second = liveSession();
+    await second.handlers.session_start({}, { sessionManager: { getBranch: () => goalEntries } });
+    assert.match(await goalStatus(second.goal()), /Status: parked/);
+  } finally {
+    delete process.env.OMP_AUTO_LOOP_TIMEOUT_MS;
+  }
+});
+
+test("reopen un-parks a parked goal with a fresh cycle", { skip: !hasGit && "needs git for worktree attestation" }, async () => {
+  const repo = gitRepo();
+  policy({ op: "param", key: "parkAfter", value: 1 });
+  process.env.OMP_AUTO_LOOP_TIMEOUT_MS = "0";
+  try {
+    const { handlers, goal, heard } = liveSession();
+    await goal().execute("t1", { action: "set", objective: "waiting on the mirror" });
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "registry 503s" }] }, { hasUI: true, cwd: repo });
+    assert.match(await goalStatus(goal()), /Status: parked/);
+    // session_stop set the ctx cwd to the repo, so the session answers to the
+    // graph label built from it (same shape the dashboard steers to).
+    const reopened = heard(/^\[operator\]/);
+    appendFileSync(
+      join(stateDir, "control.jsonl"),
+      encodeCommand({
+        at: Date.now() + 1,
+        target: `${basename(repo)}#${`p${process.pid}`.slice(0, 8)}`,
+        action: "reopen",
+        value: "the mirror is back",
+      }),
+    );
+    const message = await reopened;
+    assert.match(message, /parked goal was reopened/);
+    assert.match(message, /the mirror is back/);
+    assert.match(message, /Recorded blocker: registry 503s/);
+    assert.match(await goalStatus(goal()), /Status: active/);
+  } finally {
+    delete process.env.OMP_AUTO_LOOP_TIMEOUT_MS;
+  }
 });

@@ -22,6 +22,7 @@ import {
   EMPTY_POLICY,
   encodeOp,
   EXTENSIBLE,
+  DEFAULT_PARK_AFTER,
   PARAMS,
   PROMPTS,
   VOCABULARIES,
@@ -294,7 +295,7 @@ export function parseProjection(text: string, eventsText?: string): DashboardSta
         goal: node.body,
         activeGoal: node.tags.includes("active-goal"),
         status: node.tags.includes("active-goal") ? "working" : "idle",
-        outcome: node.tags.find((t) => !["active-goal", "no-goal", "main", "sub"].includes(t)) ?? "",
+        outcome: node.tags.find((t) => !["active-goal", "no-goal", "parked-goal", "main", "sub"].includes(t)) ?? "",
         continuations: num(node.props, "continuations"),
         maxContinuations: num(node.props, "max_continuations"),
         heartbeats: num(node.props, "heartbeats"),
@@ -366,6 +367,7 @@ export function humanise(row: DecisionRow): string {
       judged_complete: "stopped — the judge corroborated the claim",
       judge_unavailable: "stopped — the judge could not be reached",
       verified_complete: "stopped — gates passed",
+      parked_blocked: "parked — blocked on something external; reopen to resume",
       continuation_limit: "stopped — out of continuations",
       cycle_timeout: "stopped — ran out of time",
       error: "stopped — the turn errored",
@@ -589,7 +591,12 @@ function renderSteer(state: DashboardState, view: ControlView, now: number): str
         <td>${chip(on ? "on" : "off", on ? "on" : "off")}</td>
         <td>${act(on ? "turn off" : "turn on", { op: "param", key: spec.key, value: on ? 0 : 1 })}</td></tr>`;
     }
-    const effective = spec.key === "timeoutMs" ? view.limits.timeoutMs : view.limits.maxContinuations;
+    const effective =
+      spec.key === "timeoutMs"
+        ? view.limits.timeoutMs
+        : spec.key === "maxContinuations"
+          ? view.limits.maxContinuations
+          : (set ?? DEFAULT_PARK_AFTER);
     const shown = spec.unit === "ms" ? Math.round(effective / 60_000) : effective;
     return `<tr data-scope><td><b>${escapeHtml(spec.label)}</b><br><span class="dim">${escapeHtml(spec.description)}</span></td>
       <td>${spec.unit === "ms" ? minutes(effective) : effective}${set === undefined ? ' <span class="dim">(env/default)</span>' : ' <span class="dim">(set here)</span>'}</td>

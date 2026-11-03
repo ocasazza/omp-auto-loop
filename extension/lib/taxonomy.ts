@@ -86,7 +86,8 @@ export function classify(msg: string): EventClass {
 /**
  * Settle reasons: why a cycle closed. Every term is a label — nothing reads
  * one to choose behaviour — but each has a producer, so a new term is a new
- * call site in core.ts or gates.ts, never a data-only addition.
+ * call site in core.ts, gates.ts, or the entry's parking path
+ * (auto-loop.ts), never a data-only addition.
  */
 export const SETTLE_REASONS = [
   {
@@ -165,6 +166,12 @@ export const SETTLE_REASONS = [
     id: "gate_unavailable",
     label: "Gate unavailable",
     description: "A gate could not be run.",
+    usage: "label",
+  },
+  {
+    id: "parked_blocked",
+    label: "Parked, blocked",
+    description: "Unchanged blocker settles repeated past parkAfter; the goal parked and waits for a reopen.",
     usage: "label",
   },
   {

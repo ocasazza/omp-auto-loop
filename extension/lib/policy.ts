@@ -41,6 +41,16 @@ export const PARAMS = [
     proposable: true,
   },
   {
+    key: "parkAfter",
+    label: "Blocker settles before parking",
+    description:
+      "Consecutive unchanged timeout/error settles before a goal parks (0 disables parking).",
+    unit: "count",
+    min: 0,
+    max: 50,
+    proposable: true,
+  },
+  {
     key: "queueAutoPull",
     label: "Pull the next queued goal on settle",
     description: "When a cycle settles, the session claims the top queued goal for its repo.",
@@ -95,6 +105,12 @@ export const DEFAULT_FLAGS: Readonly<Partial<Record<ParamKey, number>>> = {
   queueAutoPull: 0,
   reflect: 1,
 };
+
+/**
+ * Blocker settles (cycle_timeout | error) with an unchanged fingerprint that
+ * pile up before a goal parks; `parkAfter = 0` disables parking.
+ */
+export const DEFAULT_PARK_AFTER = 3;
 
 export const VOCABULARIES = {
   event: { label: "Event classes", terms: EVENT_CLASSES },
