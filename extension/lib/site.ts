@@ -295,3 +295,154 @@ export function projectSite(input: {
 
   return { objects, morphisms: [...governs, ...targets, ...revises] };
 }
+
+// -- Writes ------------------------------------------------------------------
+
+/** A revised record as the emitter writes it: the object's id, sort and stringly fields. */
+export interface SiteWriteRecord {
+  readonly id: string;
+  readonly sort: string;
+  readonly fields: Readonly<Record<string, string>>;
+}
+
+/** Parse the emitter's write: `{ objects: [record...], morphisms: [...] }`. */
+export function parseSiteWrite(body: unknown): { records: SiteWriteRecord[] } | { error: string } {
+  if (typeof body !== "object" || body === null || !("objects" in body)) return { error: "the write needs an objects array" };
+  if (!Array.isArray(body.objects)) return { error: "the write's objects must be an array" };
+  const records: SiteWriteRecord[] = [];
+  for (const raw of body.objects) {
+    if (typeof raw !== "object" || raw === null) return { error: "each record must be an object" };
+    if (!("id" in raw) || typeof raw.id !== "string" || !raw.id) return { error: "each record needs a string id" };
+    if (!("sort" in raw) || typeof raw.sort !== "string" || !raw.sort) return { error: `record ${raw.id} needs a string sort` };
+    const fields: Record<string, string> = {};
+    for (const [key, value] of Object.entries(raw)) {
+      if (key === "id" || key === "sort" || key === "tags") continue;
+      if (typeof value !== "string") return { error: `record ${raw.id} field ${key} must be a string` };
+      fields[key] = value;
+    }
+    records.push({ id: raw.id, sort: raw.sort, fields });
+  }
+  return { records };
+}
+
+/** The steering a site edit can imply: an overturned claim goes back to work. */
+export interface SiteSteer {
+  readonly target: string;
+  readonly action: "reopen";
+  readonly value?: string;
+}
+
+export type SiteEditResult = { ops: PolicyOp[]; steer?: SiteSteer } | { error: string; status: 400 | 404 };
+
+const isVocabulary = (value: string): value is Vocabulary => VOCABULARY_ORDER.some((vocab) => vocab === value);
+
+/**
+ * Translate one revised record into the PolicyOp(s) it names. The record
+ * carries every field the object has; only a field that differs from the
+ * served site is the edit's change — volatile fields (counts, the at stamp)
+ * are never settable, so they cannot read as one. The route validates each op
+ * through validateOp before anything is appended.
+ */
+export function translateSiteEdit(record: SiteWriteRecord, site: ControlSite): SiteEditResult {
+  const current = site.objects.find((object) => object.id === record.id);
+  if (!current) return { error: `no ${record.sort} with id ${record.id} in the site`, status: 404 };
+  const changed = (name: string): boolean => {
+    const value = current[name];
+    return record.fields[name] !== undefined && record.fields[name] !== (typeof value === "string" ? value : "");
+  };
+
+  switch (record.sort) {
+    case "claim": {
+      const verdict = record.id.startsWith("claim:") ? record.id.slice("claim:".length) : "";
+      if (!verdict) return { error: `a claim record needs id claim:<verdict>, got ${record.id}`, status: 400 };
+      if (!changed("decision")) {
+        // The ratify edit always sets a decision; a note-only write is not one of the loop's intents.
+        return changed("note") ? { error: "ratifying a claim needs a decision: accepted or overturned", status: 400 } : { ops: [] };
+      }
+      const decision = record.fields.decision;
+      if (decision !== "accepted" && decision !== "overturned") {
+        return { error: "a claim's decision must be accepted or overturned", status: 400 };
+      }
+      const note = record.fields.note?.trim() || undefined;
+      const at = verdict.lastIndexOf("@");
+      return {
+        ops: [{ op: "ratify", verdict, decision, ...(note ? { note } : {}) }],
+        // Overturning is only half a decision until the session hears it.
+        ...(decision === "overturned" && at > 0 ? { steer: { target: verdict.slice(0, at), action: "reopen" as const, ...(note ? { value: note } : {}) } } : {}),
+      };
+    }
+
+    case "proposal": {
+      const id = record.id.startsWith("proposal:") ? record.id.slice("proposal:".length) : "";
+      if (!id) return { error: `a proposal record needs id proposal:<id>, got ${record.id}`, status: 400 };
+      if (!changed("status")) return { ops: [] };
+      const decision = record.fields.status;
+      if (decision !== "accepted" && decision !== "rejected") {
+        return { error: "a proposal's status is decided as accepted or rejected", status: 400 };
+      }
+      return { ops: [{ op: "proposal.decide", id, decision }] };
+    }
+
+    case "queued_goal": {
+      const id = record.id.startsWith("queued_goal:") ? record.id.slice("queued_goal:".length) : "";
+      if (!id) return { error: `a queued_goal record needs id queued_goal:<id>, got ${record.id}`, status: 400 };
+      const ops: PolicyOp[] = [];
+      if (changed("priority")) ops.push({ op: "queue.priority", id, priority: Number(record.fields.priority) });
+      if (changed("status")) {
+        // claimed and parked are the loop's own writes; the operator retires.
+        if (record.fields.status !== "retired") {
+          return { error: `a queued goal's status is retired by an edit, not ${record.fields.status}`, status: 400 };
+        }
+        ops.push({ op: "queue.retire", id });
+      }
+      return { ops };
+    }
+
+    case "repo_policy": {
+      const repo = record.id.startsWith("repo_policy:") ? record.id.slice("repo_policy:".length) : "";
+      if (!repo) return { error: `a repo_policy record needs id repo_policy:<repo>, got ${record.id}`, status: 400 };
+      const ops: PolicyOp[] = [];
+      if (changed("gates")) {
+        ops.push({ op: "gates", repo, commands: record.fields.gates.split("\n").map((line) => line.trim()).filter(Boolean) });
+      }
+      if (changed("criteria")) ops.push({ op: "criteria", repo, text: record.fields.criteria });
+      return { ops };
+    }
+
+    case "param": {
+      const spec = PARAMS.find((p) => p.key === record.id.slice("param:".length));
+      if (!spec) return { error: `no param record ${record.id} in the site`, status: 400 };
+      if (!changed("value")) return { ops: [] };
+      return { ops: [{ op: "param", key: spec.key, value: Number(record.fields.value) }] };
+    }
+
+    case "prompt": {
+      const spec = PROMPTS.find((p) => p.key === record.id.slice("prompt:".length));
+      if (!spec) return { error: `no prompt record ${record.id} in the site`, status: 400 };
+      if (!changed("text")) return { ops: [] };
+      // Blank text clears, like criteria: an empty custom prompt would be sent verbatim.
+      const text = record.fields.text.trim() ? record.fields.text : null;
+      return { ops: [{ op: "prompt", key: spec.key, text }] };
+    }
+
+    case "term": {
+      const rest = record.id.startsWith("term:") ? record.id.slice("term:".length) : "";
+      const at = rest.indexOf(":");
+      const vocab = at === -1 ? "" : rest.slice(0, at);
+      const id = at === -1 ? "" : rest.slice(at + 1);
+      if (!isVocabulary(vocab) || !id) return { error: `a term record needs id term:<vocab>:<term>, got ${record.id}`, status: 400 };
+      const edit: { op: "term"; vocab: Vocabulary; id: string; description?: string; hidden?: boolean } = { op: "term", vocab, id };
+      if (changed("description")) edit.description = record.fields.description;
+      if (changed("hidden")) {
+        if (record.fields.hidden !== "true" && record.fields.hidden !== "false") {
+          return { error: "a term's hidden is written as true or false", status: 400 };
+        }
+        edit.hidden = record.fields.hidden === "true";
+      }
+      return edit.description === undefined && edit.hidden === undefined ? { ops: [] } : { ops: [edit] };
+    }
+
+    default:
+      return { error: `no edit accepts a ${record.sort} record`, status: 400 };
+  }
+}
