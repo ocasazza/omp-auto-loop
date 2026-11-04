@@ -43,7 +43,7 @@ import { selectCommands, type ControlCommand } from './lib/control.ts';
 import type { ExtensionCommandContext, AutocompleteItem } from '@oh-my-pi/pi-coding-agent';
 
 import { type } from "@oh-my-pi/omptype";
-import { exec as childExec } from "node:child_process";
+import { exec as childExec, execFile as childExecFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
@@ -83,7 +83,7 @@ import {
   type RepoRef,
   type SessionState,
 } from "./lib/observation.ts";
-import { CanvasLifecycle } from "./lib/canvas.ts";
+import { canvasFromConfig } from "./lib/canvas.ts";
 import type { FsPort } from "./lib/ports.ts";
 import { replayCycle, type LoopEvent } from "./lib/resume.ts";
 import {
@@ -323,6 +323,18 @@ export default function (pi: {
     `${process.env.XDG_STATE_HOME ?? `${process.env.HOME ?? ""}/.local/state`}/omp-auto-loop/events.jsonl`;
   const stateDir = dirname(statusFile);
   const policyFile = `${stateDir}/policy.jsonl`;
+  // The jump-cannon canvas runs while an interactive session holds a lease
+  // (lifecycle "omp"); the module writes the agent label only for that mode.
+  const canvas = canvasFromConfig({
+    canvasAgentFile: path.join(AUTO_LOOP_CONFIG_DIR, "canvas-agent"),
+    leaseDir: `${stateDir}/canvas-leases`,
+    launchctl: (args) =>
+      new Promise((resolve, reject) =>
+        childExecFile("launchctl", [...args], (error) => (error ? reject(error) : resolve())),
+      ),
+  });
+  const canvasError = (error: unknown) =>
+    console.error(`[auto-loop] canvas: ${error instanceof Error ? error.message : String(error)}`);
 
   // The operator's policy, re-folded only when the file changes: the settle
   // path reads it on every decision and the log is append-only.
@@ -875,6 +887,7 @@ export default function (pi: {
   }
 
   pi.on("session_start", async (event, ctx) => {
+    if (canvas && ctx.hasUI) void canvas.acquire().catch(canvasError);
     loopState.lastCtx = ctx; // Set lastCtx in loopState
     // Replay overrides
     const configEntries = readCustomEntries(ctx, "auto_loop_config");
@@ -914,6 +927,10 @@ export default function (pi: {
       }, getEffective().heartbeatMs);
       if (typeof heartbeatTimer.unref === "function") heartbeatTimer.unref();
     }
+  });
+
+  pi.on("session_shutdown", async () => {
+    await canvas?.release().catch(canvasError);
   });
 
   pi.on("session_switch", (event, ctx) => {

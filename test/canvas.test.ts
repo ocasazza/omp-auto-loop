@@ -3,7 +3,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CanvasLifecycle, type CanvasPorts } from "../extension/lib/canvas.ts";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CanvasLifecycle, canvasFromConfig, type CanvasPorts } from "../extension/lib/canvas.ts";
 
 function host(alive: Set<number>) {
   const leases = new Set<string>();
@@ -59,4 +62,43 @@ test("release without acquire is a no-op; acquire is idempotent", async () => {
   await a.acquire();
   await a.acquire();
   assert.deepEqual(h.calls, ["start"]);
+});
+
+test("no canvas-agent file means the module chose another lifecycle", () => {
+  const canvas = canvasFromConfig({
+    canvasAgentFile: "/nonexistent/canvas-agent",
+    leaseDir: "/nonexistent/leases",
+    launchctl: async () => assert.fail("launchctl must not run"),
+  });
+  assert.equal(canvas, undefined);
+});
+
+test("launchd ports lease, kickstart, and stop the labelled agent in the GUI domain", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "canvas-"));
+  const calls: string[][] = [];
+  const launchctl = async (args: readonly string[]) => void calls.push([...args]);
+  const make = (pid: number) =>
+    canvasFromConfig({
+      canvasAgentFile: "label-file",
+      readText: () => "local.omp-auto-loop-jump-cannon\n",
+      leaseDir: dir,
+      launchctl,
+      pid,
+      uid: 501,
+    })!;
+  const target = "gui/501/local.omp-auto-loop-jump-cannon";
+  const first = make(process.pid);
+  const second = make(process.pid);
+
+  await first.acquire();
+  await second.acquire();
+  assert.equal(readdirSync(dir).length, 2);
+  assert.deepEqual(calls, [["kickstart", target], ["kickstart", target]]);
+
+  await first.release();
+  assert.deepEqual(calls.at(-1), ["kickstart", target], "a live lease keeps the canvas running");
+  await second.release();
+  assert.deepEqual(calls.at(-1), ["kill", "SIGTERM", target]);
+  assert.deepEqual(readdirSync(dir), []);
+  rmSync(dir, { recursive: true, force: true });
 });
