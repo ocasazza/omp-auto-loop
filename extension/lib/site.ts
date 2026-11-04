@@ -36,6 +36,7 @@ import { classify } from "./taxonomy.ts";
 export interface SiteLimits {
   readonly maxContinuations: number;
   readonly timeoutMs: number;
+  readonly parkAfter: number;
 }
 
 /** One record of the site: id/title/sort/tags, plus the grammar's stringly fields. */

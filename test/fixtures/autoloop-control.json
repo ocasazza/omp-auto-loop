@@ -363,6 +363,20 @@
       "count": "0"
     },
     {
+      "id": "term:settle:parked_blocked",
+      "title": "Parked, blocked",
+      "sort": "term",
+      "tags": [
+        "settle",
+        "label"
+      ],
+      "hidden": "false",
+      "vocabulary": "settle",
+      "term": "parked_blocked",
+      "description": "Unchanged blocker settles repeated past parkAfter; the goal parked and waits for a reopen.",
+      "count": "0"
+    },
+    {
       "id": "term:settle:stale_result",
       "title": "Stale result",
       "sort": "term",
@@ -541,6 +555,19 @@
       "description": "Elapsed cap on one cycle; the loop settles cycle_timeout past it.",
       "min": "60000",
       "max": "21600000"
+    },
+    {
+      "id": "param:parkAfter",
+      "title": "Blocker settles before parking",
+      "sort": "param",
+      "tags": [
+        "count",
+        "default"
+      ],
+      "value": "3",
+      "description": "Consecutive unchanged timeout/error settles before a goal parks (0 disables parking).",
+      "min": "0",
+      "max": "50"
     },
     {
       "id": "param:queueAutoPull",

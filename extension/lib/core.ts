@@ -35,7 +35,7 @@ export interface Decision {
 }
 
 export interface GoalView {
-  readonly status: "idle" | "active" | "paused" | "complete";
+  readonly status: "idle" | "active" | "claimed" | "paused" | "parked" | "complete";
   readonly objective: string;
   readonly continuationsUsed: number;
 }

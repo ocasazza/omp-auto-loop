@@ -62,6 +62,7 @@ import {
   goalPrefix as v2GoalPrefix,
   type Decision,
   type GateSetOutcome,
+  type SettleReason,
 } from "./lib/core.ts";
 import {
   buildJudgePrompt,
@@ -93,6 +94,7 @@ import {
   gatesFor,
   nextQueued,
   promptText,
+  DEFAULT_PARK_AFTER,
   EMPTY_POLICY,
   type Policy,
   type PolicyOp,
@@ -214,15 +216,18 @@ async function worktreeSnapshot(
     .digest("hex");
 }
 
-const DONE_MARKER = "AUTOLOOP:DONE";
-
 export interface GoalState {
-  status: "idle" | "active" | "paused" | "complete";
+  status: "idle" | "active" | "claimed" | "paused" | "parked" | "complete";
   objective: string;
   goalId?: string;
   continuationsUsed: number;
   createdAt?: number;
   updatedAt?: number;
+  /** Why the goal parked: the last blocker settle's reason and the agent's last words. */
+  blocker?: { reason: SettleReason; message: string; at: number };
+  /** Consecutive blocker settles sharing `blockedFingerprint` — the streak toward parking. */
+  blockedSettles?: number;
+  blockedFingerprint?: string;
 }
 export const GoalParams = type({
   action: "'set'|'pause'|'resume'|'complete'|'status'",
@@ -546,15 +551,25 @@ export default function (pi: {
         if (command.value) pi.sendUserMessage(`[operator guidance] ${command.value}`);
         break;
       case "reopen": {
-        // A human overturned this session's "done": the same goal goes back to
-        // work on a fresh budget, with the reason in the agent's context.
+        // A human overturned this session's "done" — or un-parked a goal the
+        // loop gave up on: the same goal goes back to work on a fresh budget,
+        // with the reason in the agent's context.
         if (!loopState.goal.objective) break;
-        loopState.goal = { ...loopState.goal, status: "active" };
+        const wasParked = loopState.goal.status === "parked";
+        const blockerMessage = loopState.goal.blocker?.message;
+        loopState.goal = {
+          ...loopState.goal,
+          status: "active",
+          blocker: undefined,
+          blockedSettles: 0,
+          blockedFingerprint: undefined,
+        };
         actions.newCycle();
         persistGoal();
         pi.sendUserMessage(
-          `[operator] Your completion was not accepted${command.value ? `: ${command.value}` : "."} ` +
-            `Keep working on: ${loopState.goal.objective}`,
+          `[operator] ${wasParked ? "The parked goal was reopened" : "Your completion was not accepted"}${command.value ? `: ${command.value}` : "."} ` +
+            `Keep working on: ${loopState.goal.objective}` +
+            (wasParked && blockerMessage ? ` Recorded blocker: ${blockerMessage}` : ""),
         );
         break;
       }
@@ -627,6 +642,8 @@ export default function (pi: {
   // restarted or resumed session stays one hub; the pid is only a fallback
   // before any handler has delivered a context.
   let heartbeats = 0;
+  /** The session's idle-nudge timer; only unref is needed off it. */
+  let heartbeatTimer: { unref?: () => void } | undefined;
   let outcome: string | null = null;
   const repoByCwd = new Map<string, RepoRef | null>();
   // Subagents run as further extension instances in this process; this
@@ -754,6 +771,49 @@ export default function (pi: {
     if (flag(policy, "reflect")) void proposeNow(sessionLabel);
   };
 
+  /**
+   * Post-settle goal bookkeeping. Two-key completion (core.ts): only a
+   * verified or judged settle marks the goal complete; a bare claim leaves it
+   * claimed and reviewable. A streak of blocker settles (cycle_timeout |
+   * error) whose fingerprint — settle reason plus worktree digest — is
+   * unchanged parks the goal: the loop keeps hitting the same wall without
+   * the tree changing, so continuing is not progress. Parked goals are
+   * excluded from the settle entry condition and heartbeats; only a
+   * `reopen` resumes them.
+   */
+  const recordSettle = async (reason: SettleReason, detail: string): Promise<void> => {
+    if (reason === "verified_complete" || reason === "judged_complete") {
+      loopState.goal.status = "complete";
+      persistGoal();
+      note(`settled: ${reason}`);
+      return;
+    }
+    if (reason === "cycle_timeout" || reason === "error") {
+      const snapshot = await worktreeSnapshot(ctxCwd());
+      // Re-read after the await: steering may have replaced the goal meanwhile.
+      const goal = loopState.goal;
+      const fingerprint = `${reason}:${snapshot ?? "no-worktree"}`;
+      const parkAfter = readPolicy().params.parkAfter ?? DEFAULT_PARK_AFTER;
+      const blocked = goal.blockedFingerprint === fingerprint ? (goal.blockedSettles ?? 0) + 1 : 1;
+      const blocker = { reason, message: truncate(detail.trim() || reason, 400), at: Date.now() };
+      if (parkAfter > 0 && blocked >= parkAfter) {
+        loopState.goal = { ...goal, status: "parked", blocker, blockedSettles: blocked, blockedFingerprint: fingerprint };
+        loopState.completionClaimed = false;
+        persistGoal();
+        note("settled: parked_blocked");
+        return;
+      }
+      loopState.goal = { ...goal, blocker, blockedSettles: blocked, blockedFingerprint: fingerprint };
+      persistGoal();
+    } else {
+      // Only consecutive blocker settles count toward parking; any other
+      // settle breaks the streak.
+      loopState.goal = { ...loopState.goal, blockedSettles: 0, blockedFingerprint: undefined };
+      persistGoal();
+    }
+    note(`settled: ${reason}`);
+  };
+
   // A supervised dashboard-server.ts owns the port when dashboardService is
   // set; otherwise the first session to start serves it.
   let dashboard: { close: () => void; url: string } | undefined;
@@ -770,7 +830,11 @@ export default function (pi: {
           },
         },
         chat,
-        limits: () => ({ maxContinuations: getEffective().maxContinuations, timeoutMs: getEffective().timeoutMs }),
+        limits: () => ({
+          maxContinuations: getEffective().maxContinuations,
+          timeoutMs: getEffective().timeoutMs,
+          parkAfter: DEFAULT_PARK_AFTER,
+        }),
         // Another session already serving the port is the normal case on a
         // host running more than one session; only a real failure is news.
         onError: (message) => {
@@ -836,16 +900,19 @@ export default function (pi: {
     }
     // resumeFromLog should be called after loopState is initialized and potentially restored
     resumeFromLog();
-    if (loopState.goal.status === "active" && getEffective().heartbeatMs > 0) {
-      // Schedule heartbeat only if goal is active and heartbeat is enabled
-      const heartbeatInterval = setInterval(() => {
+    // Armed once per session, not per goal: the tick re-checks the goal
+    // status, so a goal set (or parked) mid-session is handled without
+    // re-arming. Only an active goal is nudged — a claimed goal awaits
+    // review and a parked goal is out of the loop.
+    if (getEffective().heartbeatMs > 0 && !heartbeatTimer) {
+      heartbeatTimer = setInterval(() => {
         if (sessionIdle() && loopState.goal.status === "active") {
           loopState.lastNudgeAt = Date.now();
           pi.sendMessage("heartbeat");
           heartbeats++;
         }
       }, getEffective().heartbeatMs);
-      // Clean up on session_stop (will be registered below)
+      if (typeof heartbeatTimer.unref === "function") heartbeatTimer.unref();
     }
   });
 
@@ -862,11 +929,22 @@ export default function (pi: {
 
     const currentConfig = getEffective();
 
-    // `goal complete` moves the goal to "complete" before the turn ends, so
-    // gating on "active" alone would skip the decision for exactly the state
-    // that needs one.
-    if ((loopState.goal.status === "active" || loopState.completionClaimed) && !loopState.paused && !loopState.disabled) {
-      const stopReason = lastAssistantText(event);
+    // A completion claim (`goal complete`) marks the goal "claimed" before
+    // the turn ends, so gating on "active" alone would skip the decision for
+    // exactly the state that needs one. A parked goal is out of the loop:
+    // no settle, no continuation, until a reopen.
+    if (
+      (loopState.goal.status === "active" ||
+        loopState.goal.status === "claimed" ||
+        loopState.completionClaimed) &&
+      !loopState.paused &&
+      !loopState.disabled
+    ) {
+      // lastAssistantText takes the transcript array; the event is the object
+      // carrying it (same shape lastMessages reads below). Passing the event
+      // itself made the text always "" — the judge judged an empty reply and
+      // no blocker detail was ever captured.
+      const stopReason = lastAssistantText(lastMessages(event));
       // The decision core is pure: it takes observed facts, not ports. Gates
       // are evidence, so they run HERE and their aggregate is passed in.
       const gateCommands = gateCommandsNow(currentConfig);
@@ -911,7 +989,14 @@ export default function (pi: {
         }
       }
       const decision = shouldContinue({
-        state: loopState,
+        // CycleState, not the wider loop state: cycleStart is the elapsed
+        // cap's anchor, and an undefined startedAtMs made `nowMs - x` NaN, so
+        // cycle_timeout could never trip (the continuation cap still did).
+        state: {
+          continuations: loopState.continuations,
+          startedAtMs: loopState.cycleStart,
+          cycleId: loopState.goal.goalId ?? "",
+        },
         limits: {
           maxContinuations: currentConfig.maxContinuations,
           timeoutMs: currentConfig.timeoutMs,
@@ -938,13 +1023,37 @@ export default function (pi: {
       if (decision.kind === "continue") {
         loopState.continuations = decision.continuations;
         loopState.goal.continuationsUsed++;
-        pi.sendMessage(promptText(readPolicy(), "continuation"));
+        // A rejected claim sends the goal back to work with the verdict in
+        // the agent's context: the claim flag drops, the goal returns to
+        // active, and the continuation carries the gate's or the judge's
+        // rationale instead of the generic directive.
+        const gateFailure = gateOutcome?.aggregate === "failed" ? gateOutcome.failure : undefined;
+        const judgeRejection = judgeVerdict && !judgeVerdict.done ? judgeVerdict : undefined;
+        if (gateFailure || judgeRejection) {
+          loopState.completionClaimed = false;
+          if (loopState.goal.status === "claimed") {
+            loopState.goal.status = "active";
+            persistGoal();
+          }
+          const prefix = v2GoalPrefix(loopState.goal, loopState.goal.goalId);
+          pi.sendMessage(
+            gateFailure
+              ? gateFailureContext(gateFailure, DEFAULT_GATE_RETRIES, prefix)
+              : judgeRejection
+                ? judgeFailureContext(judgeRejection.rationale, prefix)
+                : promptText(readPolicy(), "continuation"),
+          );
+        } else {
+          pi.sendMessage(promptText(readPolicy(), "continuation"));
+        }
         loopState.scheduledContinuation = true;
         note(
-          `autonomous continuation: ${loopState.continuations}/${currentConfig.maxContinuations}. ${decision.reason ?? "no claim"}`,
+          `autonomous continuation: ${loopState.continuations}/${currentConfig.maxContinuations}. ${
+            gateFailure ? "gate failed" : judgeRejection ? "claim rejected" : (decision.reason ?? "no claim")
+          }`,
         );
       } else if (decision.kind === "settle") {
-        note(`settled: ${decision.reason}`);
+        await recordSettle(decision.reason, stopReason);
         afterSettle();
       }
     }
@@ -962,7 +1071,8 @@ export default function (pi: {
     label: "Goal",
     description:
       "Own the thread goal for the autonomous loop (port of prime-agent's goal skill). " +
-      "set: start/replace the goal (objective required). pause/resume/complete: change status. " +
+      "set: start/replace the goal (objective required). pause/resume: change status. " +
+      "complete: claim the goal done — the loop's gates or judge must still confirm it. " +
       "status: report. While a goal is active the loop keeps the session working toward it " +
       "and an idle heartbeat re-checks progress.",
     approval: "read",
@@ -979,14 +1089,24 @@ export default function (pi: {
         return { content: [{ type: "text", text: `Goal active: ${objective}` }] };
       }
       if (params.action === "complete") {
-        if (loopState.goal.status !== "active") {
+        if (loopState.goal.status !== "active" && loopState.goal.status !== "claimed") {
           return { content: [{ type: "text", text: "No active goal to complete." }] };
         }
-        loopState.goal.status = "complete";
+        // A claim is not a completion: the goal moves to `claimed` and only a
+        // settle that verifies or judges it complete ends it (two-key
+        // completion, core.ts). Re-claiming a claimed goal re-records the claim.
+        loopState.goal.status = "claimed";
         loopState.completionClaimed = true;
         persistGoal();
         note("goal complete");
-        return { content: [{ type: "text", text: "Goal completed." }] };
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Goal claimed. It counts as complete only once the loop verifies it — gates pass or the judge corroborates — so keep objective evidence in the transcript.",
+            },
+          ],
+        };
       }
       if (params.action === "pause") {
         if (loopState.goal.status !== "active") {

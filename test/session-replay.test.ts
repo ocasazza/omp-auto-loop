@@ -108,10 +108,13 @@ function liveSession() {
   const handlers: Record<string, (event?: unknown, ctx?: unknown) => unknown> = {};
   const said: string[] = [];
   const sent: string[] = [];
+  const entries: Entry[] = [];
   let tool: Tool | undefined;
   let onSaid: ((m: string) => void) | undefined;
   const pi = {
     ...makePi(handlers),
+    // Same shape the runtime writes, so a restart test can replay them verbatim.
+    appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     sendUserMessage: (m: string) => {
       said.push(m);
       onSaid?.(m);
@@ -130,8 +133,39 @@ function liveSession() {
     };
     return promise;
   };
-  return { handlers, said, sent, heard, goal: () => tool! };
+  return { handlers, said, sent, heard, goal: () => tool!, entries };
 }
+
+const eventsLog = join(stateDir, "events.jsonl");
+const eventCount = (needle: string): number =>
+  existsSync(eventsLog) ? readFileSync(eventsLog, "utf8").split(needle).length - 1 : 0;
+
+/**
+ * Polls the event log until `needle` appears more than `atLeast` times. Real
+ * polling because the sink appends asynchronously and exposes no promise, so
+ * there is no signal to await (same as the gates test below); the interval is
+ * a bounded wait on a real side effect, not a guess at one.
+ */
+async function logged(needle: string, atLeast = 0): Promise<boolean> {
+  for (let i = 0; i < 100; i++) {
+    if (eventCount(needle) > atLeast) return true;
+    await Bun.sleep(20);
+  }
+  return false;
+}
+
+/** The goal tool's status line: the observable goal state between stops. */
+async function goalStatus(tool: Tool): Promise<string> {
+  const res = (await tool.execute("status-check", { action: "status" })) as { content: { text: string }[] };
+  return res.content[0]!.text;
+}
+
+/** A fresh git repo, so worktree attestation has something to attest. */
+const gitRepo = (): string => {
+  const repo = mkdtempSync(join(tmpdir(), "loop-repo-"));
+  execSync("git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init", { cwd: repo });
+  return repo;
+};
 
 const policy = (...ops: Parameters<typeof encodeOp>[0][]) =>
   appendFileSync(join(stateDir, "policy.jsonl"), ops.map((op) => encodeOp(op, Date.now(), "test")).join(""));
@@ -184,4 +218,186 @@ test("gates set on the dashboard make verified_complete reachable", { skip: !has
   const settled = () => existsSync(log) && readFileSync(log, "utf8").includes("settled: verified_complete");
   for (let i = 0; i < 100 && !settled(); i++) await Bun.sleep(20);
   assert.ok(settled(), readFileSync(log, "utf8"));
+});
+
+// --- claim is not completion -----------------------------------------------
+
+test("goal complete claims the goal instead of completing it", async () => {
+  const { goal } = liveSession();
+  await goal().execute("t1", { action: "set", objective: "prove the loop" });
+  const before = eventCount("goal complete");
+  await goal().execute("t2", { action: "complete" });
+  assert.match(await goalStatus(goal()), /Status: claimed/);
+  assert.doesNotMatch(await goalStatus(goal()), /Status: complete/);
+  // The claim still notes `goal complete` for the record — one more than before.
+  assert.ok(await logged("goal complete", before), "the claim is noted for the record");
+});
+
+test("a bare claim settles claimed_unverified and the goal stays claimed, reviewable", async () => {
+  const { handlers, goal } = liveSession();
+  await goal().execute("t1", { action: "set", objective: "unproven work" });
+  await goal().execute("t2", { action: "complete" });
+  await handlers.session_stop({ messages: [{ role: "assistant", content: "done" }] }, { hasUI: true, cwd: isolated });
+  assert.ok(await logged("settled: claimed_unverified"), "the cycle settles as claimed_unverified");
+  assert.match(await goalStatus(goal()), /Status: claimed/);
+});
+
+test("a judge-rejected claim returns the goal to active with the rationale in the prompt", async () => {
+  // A local OpenAI-shaped endpoint answers UNVERIFIED, so the judge runs
+  // without leaving the process and the verdict is deterministic.
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => Response.json({ choices: [{ message: { content: "the transcript shows no test run.\nUNVERIFIED" } }] }),
+  });
+  process.env.OMP_AUTO_LOOP_JUDGE_MODEL = "test-judge";
+  process.env.OMP_AUTO_LOOP_JUDGE_BASE_URL = `http://127.0.0.1:${server.port}/v1`;
+  try {
+    const { handlers, goal, sent } = liveSession();
+    await goal().execute("t1", { action: "set", objective: "corroborated work" });
+    await goal().execute("t2", { action: "complete" });
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "it is done" }] }, { hasUI: true, cwd: isolated });
+    assert.equal(sent.length, 1, "exactly the continuation prompt is sent");
+    assert.match(sent[0]!, /\[auto-loop: judge-rejected\]/);
+    assert.match(sent[0]!, /the transcript shows no test run\./);
+    assert.match(await goalStatus(goal()), /Status: active/);
+  } finally {
+    delete process.env.OMP_AUTO_LOOP_JUDGE_MODEL;
+    delete process.env.OMP_AUTO_LOOP_JUDGE_BASE_URL;
+    server.stop(true);
+  }
+});
+
+test("a gate-failed claim returns the goal to active with the failure in the prompt", { skip: !hasGit && "needs git for worktree attestation" }, async () => {
+  const repo = gitRepo();
+  policy({ op: "gates", repo: basename(repo), commands: ["exit 3"] });
+  const { handlers, goal, sent } = liveSession();
+  await goal().execute("t1", { action: "set", objective: "make the gate green" });
+  await goal().execute("t2", { action: "complete" });
+  await handlers.session_stop({ messages: [{ role: "assistant", content: "done, trust me" }] }, { hasUI: true, cwd: repo });
+  assert.equal(sent.length, 1, "exactly the continuation prompt is sent");
+  assert.match(sent[0]!, /\[auto-loop: gate-failed\]/);
+  assert.match(sent[0]!, /`exit 3` exited 3/);
+  assert.match(await goalStatus(goal()), /Status: active/);
+});
+
+test("a verified settle marks the goal complete", { skip: !hasGit && "needs git for worktree attestation" }, async () => {
+  const repo = gitRepo();
+  policy({ op: "gates", repo: basename(repo), commands: ["true"] });
+  const { handlers, goal } = liveSession();
+  await goal().execute("t1", { action: "set", objective: "ship it" });
+  await goal().execute("t2", { action: "complete" });
+  const before = eventCount("settled: verified_complete");
+  await handlers.session_stop({ messages: [{ role: "assistant", content: "done" }] }, { hasUI: true, cwd: repo });
+  assert.ok(await logged("settled: verified_complete", before), "the gate set verified the claim");
+  assert.match(await goalStatus(goal()), /Status: complete/);
+});
+
+// --- parking on external blockers -------------------------------------------
+
+test("repeated unchanged blocker settles park the goal; a state change resets the count", { skip: !hasGit && "needs git for worktree attestation" }, async () => {
+  const repo = gitRepo();
+  policy({ op: "param", key: "parkAfter", value: 3 });
+  process.env.OMP_AUTO_LOOP_TIMEOUT_MS = "0"; // every stop settles cycle_timeout
+  try {
+    const { handlers, goal, sent } = liveSession();
+    await goal().execute("t1", { action: "set", objective: "blocked on the registry" });
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "waiting" }] }, { hasUI: true, cwd: repo });
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "waiting" }] }, { hasUI: true, cwd: repo });
+    assert.match(await goalStatus(goal()), /Status: active/, "two blockers is short of parkAfter 3");
+    // The worktree changes, so the blocker fingerprint no longer matches: the streak restarts.
+    writeFileSync(join(repo, "progress.txt"), "work happened\n");
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "waiting" }] }, { hasUI: true, cwd: repo });
+    assert.match(await goalStatus(goal()), /Status: active/, "a changed state resets the count");
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "still blocked" }] }, { hasUI: true, cwd: repo });
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "still blocked" }] }, { hasUI: true, cwd: repo });
+    assert.ok(await logged("settled: parked_blocked"), "the parking is recorded in the log");
+    assert.match(await goalStatus(goal()), /Status: parked/);
+    // Parked goals are out of the loop: a further stop decides nothing.
+    const settles = eventCount("settled: ");
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "still blocked" }] }, { hasUI: true, cwd: repo });
+    assert.deepEqual(sent, [], "a parked goal gets no continuation");
+    assert.equal(eventCount("settled: "), settles, "a parked goal is not settled again");
+    assert.match(await goalStatus(goal()), /Status: parked/);
+  } finally {
+    delete process.env.OMP_AUTO_LOOP_TIMEOUT_MS;
+  }
+});
+
+test("a parked goal survives a restart", { skip: !hasGit && "needs git for worktree attestation" }, async () => {
+  const repo = gitRepo();
+  policy({ op: "param", key: "parkAfter", value: 1 });
+  process.env.OMP_AUTO_LOOP_TIMEOUT_MS = "0";
+  try {
+    const first = liveSession();
+    await first.goal().execute("t1", { action: "set", objective: "stuck on flaky infra" });
+    await first.handlers.session_stop({ messages: [{ role: "assistant", content: "registry 503s" }] }, { hasUI: true, cwd: repo });
+    assert.match(await goalStatus(first.goal()), /Status: parked/);
+    // A fresh process replays the persisted goal entries through session_start.
+    const goalEntries = first.entries.filter((e) => e.customType === "auto_loop_goal");
+    const second = liveSession();
+    await second.handlers.session_start({}, { sessionManager: { getBranch: () => goalEntries } });
+    assert.match(await goalStatus(second.goal()), /Status: parked/);
+  } finally {
+    delete process.env.OMP_AUTO_LOOP_TIMEOUT_MS;
+  }
+});
+
+test("reopen un-parks a parked goal with a fresh cycle", { skip: !hasGit && "needs git for worktree attestation" }, async () => {
+  const repo = gitRepo();
+  policy({ op: "param", key: "parkAfter", value: 1 });
+  process.env.OMP_AUTO_LOOP_TIMEOUT_MS = "0";
+  try {
+    const { handlers, goal, heard } = liveSession();
+    await goal().execute("t1", { action: "set", objective: "waiting on the mirror" });
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "registry 503s" }] }, { hasUI: true, cwd: repo });
+    assert.match(await goalStatus(goal()), /Status: parked/);
+    // session_stop set the ctx cwd to the repo, so the session answers to the
+    // graph label built from it (same shape the dashboard steers to).
+    const reopened = heard(/^\[operator\]/);
+    appendFileSync(
+      join(stateDir, "control.jsonl"),
+      encodeCommand({
+        at: Date.now() + 1,
+        target: `${basename(repo)}#${`p${process.pid}`.slice(0, 8)}`,
+        action: "reopen",
+        value: "the mirror is back",
+      }),
+    );
+    const message = await reopened;
+    assert.match(message, /parked goal was reopened/);
+    assert.match(message, /the mirror is back/);
+    assert.match(message, /Recorded blocker: registry 503s/);
+    assert.match(await goalStatus(goal()), /Status: active/);
+  } finally {
+    delete process.env.OMP_AUTO_LOOP_TIMEOUT_MS;
+  }
+});
+
+// The heartbeat is a real interval — the wall-clock behavior is the thing
+// under test — so these waits are the exercised behavior, not a guess at it;
+// every negative assertion is guarded by the tick's own status check and so
+// cannot flake with load.
+test("a goal set mid-session gets heartbeats; a parked goal stops getting them", async () => {
+  process.env.OMP_AUTO_LOOP_HEARTBEAT_MS = "20";
+  try {
+    const { handlers, goal, sent } = liveSession();
+    const idleCtx = { hasUI: true, cwd: isolated, isIdle: () => true };
+    await handlers.session_start({}, idleCtx);
+    await Bun.sleep(150);
+    assert.ok(!sent.includes("heartbeat"), "no goal, no nudge");
+    await goal().execute("t1", { action: "set", objective: "nudge me" });
+    await Bun.sleep(150);
+    assert.ok(sent.includes("heartbeat"), "a goal set mid-session still gets nudges");
+    // Park it: timeout 0 settles cycle_timeout, parkAfter 1 parks at once.
+    process.env.OMP_AUTO_LOOP_TIMEOUT_MS = "0";
+    policy({ op: "param", key: "parkAfter", value: 1 });
+    await handlers.session_stop({ messages: [{ role: "assistant", content: "blocked" }] }, idleCtx);
+    assert.match(await goalStatus(goal()), /Status: parked/);
+    sent.length = 0;
+    await Bun.sleep(150);
+    assert.deepEqual(sent, [], "a parked goal is not nudged");
+  } finally {
+    delete process.env.OMP_AUTO_LOOP_HEARTBEAT_MS;
+    delete process.env.OMP_AUTO_LOOP_TIMEOUT_MS;
+  }
 });

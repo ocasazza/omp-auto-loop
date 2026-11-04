@@ -49,7 +49,7 @@ const withDashboard = async (
     readPolicy?: () => string;
     writePolicy?: (op: PolicyOp) => void;
     steer?: (c: { target: string; action: string; value?: string }) => void;
-    limits?: () => { maxContinuations: number; timeoutMs: number };
+    limits?: () => { maxContinuations: number; timeoutMs: number; parkAfter: number };
   },
   run: (base: string) => Promise<void>,
 ) => {
@@ -100,7 +100,7 @@ test("the served site matches panel-kit's control fixture record for record", as
       readProjection: () => TRACE_LINES,
       readEvents: () => EVENTS,
       readPolicy: () => POLICY,
-      limits: () => ({ maxContinuations: 3, timeoutMs: 1_800_000 }),
+      limits: () => ({ maxContinuations: 3, timeoutMs: 1_800_000, parkAfter: 3 }),
     },
     async (base) => {
       const response = await fetch(`${base}/api/site`);
@@ -128,7 +128,7 @@ const withSite = async (run: (base: string, ops: PolicyOp[], steered: { target: 
       readPolicy: () => POLICY + ops.map((op, i) => encodeOp(op, 100 + i, "test")).join(""),
       writePolicy: (op) => ops.push(op),
       steer: (command) => steered.push(command),
-      limits: () => ({ maxContinuations: 3, timeoutMs: 1_800_000 }),
+      limits: () => ({ maxContinuations: 3, timeoutMs: 1_800_000, parkAfter: 3 }),
     },
     (base) => run(base, ops, steered),
   );

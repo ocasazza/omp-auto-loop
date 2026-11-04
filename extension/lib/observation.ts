@@ -58,7 +58,7 @@ export interface RepoRef {
 
 export interface GoalRef {
   readonly objective: string;
-  readonly status: "active" | "paused" | "complete";
+  readonly status: "active" | "claimed" | "paused" | "parked" | "complete";
 }
 
 /** Everything the projection knows about one session at one event. */
@@ -229,7 +229,11 @@ export function createGraphProjection(): GraphProjection {
       const cls = classify(msg);
 
       const tags = [
-        s.goal?.status === "active" ? "active-goal" : "no-goal",
+        s.goal?.status === "active" || s.goal?.status === "claimed"
+          ? "active-goal"
+          : s.goal?.status === "parked"
+            ? "parked-goal"
+            : "no-goal",
         s.agent,
         ...(s.outcome ? [atom(s.outcome, 40)] : []),
       ];

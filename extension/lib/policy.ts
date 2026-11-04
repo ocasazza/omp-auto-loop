@@ -41,6 +41,16 @@ export const PARAMS = [
     proposable: true,
   },
   {
+    key: "parkAfter",
+    label: "Blocker settles before parking",
+    description:
+      "Consecutive unchanged timeout/error settles before a goal parks (0 disables parking).",
+    unit: "count",
+    min: 0,
+    max: 50,
+    proposable: true,
+  },
+  {
     key: "queueAutoPull",
     label: "Pull the next queued goal on settle",
     description: "When a cycle settles, the session claims the top queued goal for its repo.",
@@ -95,6 +105,12 @@ export const DEFAULT_FLAGS: Readonly<Partial<Record<ParamKey, number>>> = {
   queueAutoPull: 0,
   reflect: 1,
 };
+
+/**
+ * Blocker settles (cycle_timeout | error) with an unchanged fingerprint that
+ * pile up before a goal parks; `parkAfter = 0` disables parking.
+ */
+export const DEFAULT_PARK_AFTER = 3;
 
 export const VOCABULARIES = {
   event: { label: "Event classes", terms: EVENT_CLASSES },
@@ -668,8 +684,12 @@ export function nextQueued(policy: Policy, repo: string | undefined): QueueItem 
 
 // -- Review queue ------------------------------------------------------------
 
-/** Settle reasons a human reviews: the loop's two ways of saying "done". */
-export const REVIEWABLE = ["judged_complete", "claimed_unverified"] as const;
+/**
+ * Settle reasons a human reviews: the loop's ways of leaving a claim open —
+ * a claim the judge corroborated, a bare claim, and a claim the judge could
+ * not reach. A gate-verified pass needs no review.
+ */
+export const REVIEWABLE = ["judged_complete", "claimed_unverified", "judge_unavailable"] as const;
 
 export interface LogEvent {
   readonly ts: string;
